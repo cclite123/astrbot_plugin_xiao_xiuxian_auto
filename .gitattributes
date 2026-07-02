@@ -1,4 +1,8 @@
-# Exclude deployment scripts and docs from git archive
+# Exclude deploy tools and dev files from git archive
+# These files are for developers only, not needed by end users installing the plugin
 deploy.ps1 export-ignore
+deploy.sh export-ignore
+deploy.bat export-ignore
+deploy-config.example.json export-ignore
 .gitattributes export-ignore
 .gitignore export-ignore

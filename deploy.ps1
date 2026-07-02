@@ -1,136 +1,206 @@
 ﻿#!/usr/bin/env pwsh
-# ============================================================
-# deploy.ps1 — 小小修仙插件增量部署脚本
-#
-# 策略：
-#   1. git archive 打包最新代码（仅含 git 跟踪文件）
-#   2. scp 上传到服务器 /tmp
-#   3. 服务器端 tar 解压，通过 --exclude 保护配置文件
-#   4. 可选：远程重载插件
-#
-# 用法：
-#   .\deploy.ps1                  # 默认部署
-#   .\deploy.ps1 -Reload          # 部署并远程重载插件
-#   .\deploy.ps1 -DryRun          # 仅展示将要同步的文件，不实际操作
-# ============================================================
+<#
+.SYNOPSIS
+    小小修仙插件 — 增量部署脚本（Windows / PowerShell）
+
+.DESCRIPTION
+    通过 git archive + tar --exclude 实现安全的增量更新，
+    自动保护服务器上的个性化配置文件不被覆盖。
+
+.PARAMETER SshHost
+    SSH 目标地址，格式: user@ip 或 user@hostname
+
+.PARAMETER Port
+    SSH 端口号（默认 22）
+
+.PARAMETER Key
+    SSH 私钥文件路径（如 D:\keys\server.pem）
+
+.PARAMETER RemoteDir
+    服务器上的 AstrBot 插件目录
+
+.PARAMETER Reload
+    部署完成后远程重载插件
+
+.PARAMETER DryRun
+    仅预览将要同步的文件，不执行实际操作
+
+.PARAMETER Config
+    从 JSON 配置文件读取连接参数（见下方示例）
+
+.EXAMPLE
+    # 交互式指定参数
+    .\deploy.ps1 -SshHost ubuntu@81.71.44.7 -Port 50022 -Key D:\keys\server.pem `
+                 -RemoteDir /opt/astrbot/data/plugins/astrbot_plugin_xiao_xiuxian_auto
+
+    # 使用配置文件
+    .\deploy.ps1 -Config .\deploy-config.json
+
+    # 预览模式
+    .\deploy.ps1 -SshHost ubuntu@81.71.44.7 -Port 50022 -Key D:\keys\server.pem `
+                 -RemoteDir /opt/astrbot/data/plugins/astrbot_plugin_xiao_xiuxian_auto -DryRun
+
+    # deploy-config.json 示例:
+    {
+        "host": "ubuntu@81.71.44.7",
+        "port": "50022",
+        "key":  "D:\\keys\\server.pem",
+        "remote_dir": "/opt/astrbot/data/plugins/astrbot_plugin_xiao_xiuxian_auto"
+    }
+#>
 
 param(
+    [string]$SshHost   = "",
+    [string]$Port      = "22",
+    [string]$Key       = "",
+    [string]$RemoteDir = "",
     [switch]$Reload,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$Config    = ""
 )
 
-# ── 连接配置 ──────────────────────────────────────────────
-$SSH_HOST    = "ubuntu@81.71.44.7"
-$SSH_PORT    = "50022"
-$SSH_KEY     = "d:\Downloads\tx24.pem"
-$REMOTE_DIR  = "/opt/astrbot/data/plugins/astrbot_plugin_xiao_xiuxian_auto"
+# ── 从配置文件加载（如果指定了 -Config） ──────────────────
+if ($Config -and (Test-Path $Config)) {
+    $cfg = Get-Content $Config -Raw | ConvertFrom-Json
+    if ($cfg.host)      { $SshHost   = $cfg.host }
+    if ($cfg.port)      { $Port      = $cfg.port }
+    if ($cfg.key)       { $Key       = $cfg.key }
+    if ($cfg.remote_dir){ $RemoteDir = $cfg.remote_dir }
+}
 
-# ── 工具路径（Git 自带 ssh/scp） ──────────────────────────
-$GIT_DIR     = Split-Path (Split-Path (Get-Command git).Source)
-$SSH         = Join-Path $GIT_DIR "usr\bin\ssh.exe" | Resolve-Path
-$SCP         = Join-Path $GIT_DIR "usr\bin\scp.exe" | Resolve-Path
+# ── 参数校验 ──────────────────────────────────────────────
+if (-not $SshHost -or -not $Key -or -not $RemoteDir) {
+    Write-Host @"
 
-# ── 保护名单（永远不会被覆盖的文件/模式） ─────────────────
+用法:
+  .\deploy.ps1 -SshHost <user@ip> -Port <port> -Key <key-path> -RemoteDir <path>
+  .\deploy.ps1 -Config deploy-config.json
+  .\deploy.ps1 -SshHost <user@ip> ... -DryRun      # Preview
+
+Parameters:
+  -SshHost    SSH target   (e.g. ubuntu@81.71.44.7)
+  -Port       SSH 端口     (默认 22)
+  -Key        SSH 私钥路径 (如 D:\keys\server.pem)
+  -RemoteDir  插件远程目录 (如 /opt/astrbot/data/plugins/astrbot_plugin_xiao_xiuxian_auto)
+  -Reload     部署后重载插件
+  -DryRun     仅预览，不实际操作
+  -Config     从 JSON 文件读取上述参数
+
+"@ -ForegroundColor Yellow
+    exit 1
+}
+
+# ── 自动检测 SSH/SCP ──────────────────────────────────────
+$SSH = $null; $SCP = $null
+
+# 方式1：系统 PATH 中查找
+$SSH = Get-Command ssh -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+$SCP = Get-Command scp -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+
+# 方式2：Git 自带的 OpenSSH
+if (-not $SSH -or -not $SCP) {
+    $gitPath = Get-Command git -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    if ($gitPath) {
+        $gitUsrBin = Join-Path (Split-Path (Split-Path $gitPath)) "usr\bin"
+        $gitSSH = Join-Path $gitUsrBin "ssh.exe"
+        $gitSCP = Join-Path $gitUsrBin "scp.exe"
+        if (-not $SSH -and (Test-Path $gitSSH)) { $SSH = $gitSSH }
+        if (-not $SCP -and (Test-Path $gitSCP)) { $SCP = $gitSCP }
+    }
+}
+
+if (-not $SSH -or -not $SCP) {
+    Write-Host "错误: 未找到 ssh/scp。请安装 OpenSSH 客户端或 Git for Windows。" -ForegroundColor Red
+    exit 1
+}
+
+# ── 受保护文件（永远不会被覆盖） ──────────────────────────
 $PROTECTED = @(
-    "config.json"                          # 主配置（含服务器个性化参数）
-    "data/market_price_runtime_config.json" # 坊市价格运行时配置
-    "data/inventory_ops_runtime_config.json"# 背包操作运行时配置
-    "data/bounty_state.json"               # 悬赏状态数据
-    "data/auto_alchemy_snapshot.json"      # 炼丹快照数据
-    "data/market_prices_cache.json"        # 坊市价格缓存
-    "data/__pycache__"                     # Python 字节码
-    "__pycache__"                          # Python 字节码
-    "*.pyc"                                # Python 编译文件
+    "config.json"
+    "data/market_price_runtime_config.json"
+    "data/inventory_ops_runtime_config.json"
+    "data/bounty_state.json"
+    "data/auto_alchemy_snapshot.json"
+    "data/market_prices_cache.json"
+    "data/__pycache__"
+    "__pycache__"
+    "*.pyc"
 )
 
-# ── 本地项目根目录 ────────────────────────────────────────
-$PROJECT_DIR = $PSScriptRoot
-if (-not $PROJECT_DIR) { $PROJECT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path }
-if (-not $PROJECT_DIR) { $PROJECT_DIR = "e:\xiaoxiuxian1.0.0" }
-
+# ── 路径与临时文件 ────────────────────────────────────────
+$PROJECT_DIR  = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $ARCHIVE_NAME = "deploy_sync_$(Get-Date -Format 'yyyyMMdd_HHmmss').tar.gz"
 $LOCAL_ARCHIVE = Join-Path $PROJECT_DIR $ARCHIVE_NAME
 $REMOTE_TMP    = "/tmp/$ARCHIVE_NAME"
 
-# ── 函数 ──────────────────────────────────────────────────
+# ── 输出函数 ──────────────────────────────────────────────
 function Write-Step($msg)  { Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)    { Write-Host "   OK: $msg" -ForegroundColor Green }
 function Write-Skip($msg)  { Write-Host "   SKIP: $msg" -ForegroundColor Yellow }
 
-# ── DryRun 模式：仅列出将同步的文件 ──────────────────────
+# ── DryRun 模式 ──────────────────────────────────────────
 if ($DryRun) {
-    Write-Step "DryRun 模式 — 以下是将被同步的文件（git 跟踪文件）"
+    Write-Step "DryRun - 以下文件将被同步（git 跟踪文件）"
     git -C $PROJECT_DIR ls-files | ForEach-Object {
         $file = $_
-        $isProtected = $false
-        foreach ($pattern in $PROTECTED) {
-            if ($file -eq $pattern -or $file -like $pattern -or $file.StartsWith("$pattern/")) {
-                $isProtected = $true
-                break
-            }
+        $hit = $false
+        foreach ($p in $PROTECTED) {
+            if ($file -eq $p -or $file -like $p -or $file.StartsWith("$p/")) { $hit = $true; break }
         }
-        if ($isProtected) {
-            Write-Skip "$file  (受保护，不会覆盖)"
-        } else {
-            Write-Host "   SYNC: $file" -ForegroundColor White
-        }
+        if ($hit) { Write-Skip "$file  (protected)" }
+        else      { Write-Host "   SYNC: $file" -ForegroundColor White }
     }
-    Write-Step "受保护文件汇总"
+    Write-Step "Protected files (will NOT be overwritten)"
     foreach ($p in $PROTECTED) { Write-Skip $p }
     exit 0
 }
 
-# ── Step 1: 打包 ──────────────────────────────────────────
-Write-Step "Step 1/4: 使用 git archive 打包最新代码"
+# ── Step 1: git archive 打包 ─────────────────────────────
+Write-Step "Step 1/4: git archive 打包"
 git -C $PROJECT_DIR archive --format=tar.gz -o $LOCAL_ARCHIVE HEAD
 if ($LASTEXITCODE -ne 0) { Write-Host "打包失败" -ForegroundColor Red; exit 1 }
-$size = (Get-Item $LOCAL_ARCHIVE).Length
-$sizeKB = [math]::Round(($size / 1024), 1)
-$sizeStr = "${sizeKB} KB"
-Write-Ok ("已打包 $ARCHIVE_NAME (" + $sizeStr + ")")
+$sz = [math]::Round(((Get-Item $LOCAL_ARCHIVE).Length / 1024), 1)
+Write-Ok ("已打包 (${sz} KB)")
 
-# ── Step 2: 上传 ──────────────────────────────────────────
-Write-Step "Step 2/4: SCP 上传到服务器"
-& $SCP -i $SSH_KEY -P $SSH_PORT -o StrictHostKeyChecking=no $LOCAL_ARCHIVE "${SSH_HOST}:${REMOTE_TMP}"
-if ($LASTEXITCODE -ne 0) { Write-Host "上传失败" -ForegroundColor Red; exit 1 }
-Write-Ok "已上传到 $REMOTE_TMP"
+# ── Step 2: SCP 上传 ─────────────────────────────────────
+Write-Step "Step 2/4: SCP 上传"
+& $SCP -i $Key -P $Port -o StrictHostKeyChecking=no $LOCAL_ARCHIVE "${SshHost}:${REMOTE_TMP}"
+if ($LASTEXITCODE -ne 0) { Write-Host "Upload failed" -ForegroundColor Red; exit 1 }
+Write-Ok "Uploaded to ${SshHost}:${REMOTE_TMP}"
 
-# ── Step 3: 解压（排除受保护文件） ────────────────────────
+# ── Step 3: 服务器端解压（排除受保护文件） ───────────────
 Write-Step "Step 3/4: 服务器端解压（保护配置文件）"
-
 $excludeArgs = ($PROTECTED | ForEach-Object { "--exclude=$_" }) -join ' '
-$remoteCmd = "cd $REMOTE_DIR ; sudo tar xzf $REMOTE_TMP $excludeArgs ; rm -f $REMOTE_TMP ; echo EXTRACT_OK"
+$remoteCmd = "cd $RemoteDir ; sudo tar xzf $REMOTE_TMP $excludeArgs ; rm -f $REMOTE_TMP ; echo EXTRACT_OK"
 
-$result = & $SSH -i $SSH_KEY -p $SSH_PORT -o StrictHostKeyChecking=no $SSH_HOST $remoteCmd 2>&1
+$result = & $SSH -i $Key -p $Port -o StrictHostKeyChecking=no $SshHost $remoteCmd 2>&1
 if ("$result" -match "EXTRACT_OK") {
     Write-Ok "解压完成"
 } else {
-    Write-Host "   解压可能有问题: $result" -ForegroundColor Yellow
+    Write-Host "   解压输出: $result" -ForegroundColor Yellow
 }
 
-# 展示保护结果
-Write-Step "受保护的文件（未被覆盖）"
+Write-Step "受保护文件（未被覆盖）"
 foreach ($p in $PROTECTED) { Write-Skip $p }
 
-# ── Step 4: 清理本地临时文件 ──────────────────────────────
+# ── Step 4: 清理 ─────────────────────────────────────────
 Write-Step "Step 4/4: 清理本地临时文件"
 Remove-Item $LOCAL_ARCHIVE -Force -ErrorAction SilentlyContinue
-Write-Ok "已清理 $ARCHIVE_NAME"
+Write-Ok "清理完成"
 
-# ── 可选：远程重载插件 ────────────────────────────────────
+# ── 可选：远程重载 ────────────────────────────────────────
 if ($Reload) {
-    Write-Step "远程重载 AstrBot 插件..."
-    $reloadCmd = 'touch ' + $REMOTE_DIR + '/main.py; echo RELOAD_DONE'
-    $reloadResult = & $SSH -i $SSH_KEY -p $SSH_PORT -o StrictHostKeyChecking=no $SSH_HOST $reloadCmd 2>&1
-    if ("$reloadResult" -match "API_RELOAD_NOT_AVAILABLE") {
-        Write-Skip "API 重载不可用，请手动在 AstrBot WebUI 中重载插件"
-    } else {
-        Write-Ok "已触发插件重载"
-    }
+    Write-Step "远程重载插件..."
+    $reloadCmd = 'touch ' + $RemoteDir + '/main.py; echo RELOAD_DONE'
+    $rr = & $SSH -i $Key -p $Port -o StrictHostKeyChecking=no $SshHost $reloadCmd 2>&1
+    if ("$rr" -match "RELOAD_DONE") { Write-Ok "已触发重载" }
+    else { Write-Skip "请手动在 AstrBot WebUI 中重载插件" }
 }
 
 # ── 完成 ──────────────────────────────────────────────────
-Write-Host "`n========================================" -ForegroundColor Green
-Write-Host "  部署完成！" -ForegroundColor Green
-Write-Host "  目标: ${SSH_HOST}:${REMOTE_DIR}" -ForegroundColor Gray
-Write-Host "========================================`n" -ForegroundColor Green
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "  Deploy complete!" -ForegroundColor Green
+Write-Host ("  Target: " + $SshHost + ":" + $RemoteDir) -ForegroundColor Gray
+Write-Host "========================================" -ForegroundColor Green
+Write-Host ""

@@ -58,6 +58,10 @@ xiaoxiuxian/
 ├── market_price_server/
 │   ├── server.py               # 坊市价格中心 FastAPI 服务（可独立部署）
 │   └── uploader_example.py     # 价格上传示例脚本
+├── deploy.ps1                  # Windows 部署脚本（PowerShell 5.1+）
+├── deploy.sh                   # Linux/macOS 部署脚本
+├── deploy.bat                  # Windows 一键启动器
+├── deploy-config.example.json  # 部署配置模板
 └── .gitignore
 ```
 
@@ -105,6 +109,74 @@ xiaoxiuxian/
    ```
 
 4. **重启 AstrBot** 即可自动加载插件。
+
+---
+
+## 部署与更新
+
+插件提供自动化部署脚本，支持 **Windows** 和 **Linux/macOS**，实现增量更新的同时自动保护服务器上的个性化配置。
+
+### 配置保护机制
+
+部署脚本使用 `git archive` + `tar --exclude` 策略：
+
+- **代码文件**（.py / .yaml / .txt / .md）→ 正常更新
+- **配置文件**（config.json / data/*_runtime_config.json）→ **永远不会被覆盖**
+- **运行时数据**（bounty_state.json / market_prices_cache.json 等）→ **永远不会被覆盖**
+
+### Windows 用户
+
+**1. 首次配置：创建 `deploy-config.json`**
+
+将 `deploy-config.example.json` 复制为 `deploy-config.json`，填入你的服务器信息：
+
+```json
+{
+    "host":       "ubuntu@your-server-ip",
+    "port":       "22",
+    "key":        "C:\\Users\\YourName\\.ssh\\server.pem",
+    "remote_dir": "/opt/astrbot/data/plugins/astrbot_plugin_xiao_xiuxian_auto"
+}
+```
+
+> `key` 为你的 SSH 私钥路径（.pem 或 id_rsa）。
+
+**2. 一键部署：双击 `deploy.bat`**
+
+或手动执行：
+
+```powershell
+# 部署
+.\deploy.ps1 -Config deploy-config.json
+
+# 预览（不实际操作）
+.\deploy.ps1 -Config deploy-config.json -DryRun
+
+# 部署并触发插件重载
+.\deploy.ps1 -Config deploy-config.json -Reload
+```
+
+> 脚本自动检测系统 SSH（优先系统 PATH，回退到 Git for Windows 自带 SSH）。
+
+### Linux / macOS 用户
+
+```bash
+# 赋予执行权限
+chmod +x deploy.sh
+
+# 部署（指定参数）
+./deploy.sh -H user@your-server -P 22 -k ~/.ssh/server.pem \
+            -d /opt/astrbot/data/plugins/astrbot_plugin_xiao_xiuxian_auto
+
+# 或使用配置文件
+./deploy.sh -c deploy-config.json
+
+# 预览模式
+./deploy.sh -c deploy-config.json --dry-run
+
+# 部署并触发重载
+./deploy.sh -c deploy-config.json --reload
+```
 
 ---
 

@@ -22,6 +22,7 @@ Thumbs.db
 # Environment & secrets
 .env
 .env.*
+deploy-config.json
 
 # Runtime cache (data 目录下的缓存文件)
 data/*_cache*.json
