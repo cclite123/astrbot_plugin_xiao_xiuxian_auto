@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment & secrets
+.env
+.env.*
+
+# Runtime cache (data 目录下的缓存文件)
+data/*_cache*.json
+data/*_runtime_config.json
+
+# Logs
+*.log

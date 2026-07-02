@@ -1,0 +1,162 @@
+{
+  "_comment_official_bot_qq": "官方机器人 QQ 号；所有需要 @小小 的指令都会使用这里的号码。",
+  "official_bot_qq": "3889001741",
+  "_comment_test_mode": "测试模式；false 为真实发送指令，true 通常用于调试时避免部分真实操作。",
+  "test_mode": false,
+  "_comment_multi_account": "多账号/多群绑定配置；一般保持默认即可。",
+  "multi_account": {
+    "enabled": true,
+    "allow_multi_groups_per_account": true,
+    "accounts": {
+      "default": {
+        "enabled": true,
+        "official_bot_qq": "3889001741",
+        "groups": []
+      }
+    }
+  },
+  "_comment_bounty": "悬赏模块配置；控制悬赏策略、重试时间、每日启动时间和随机抖动。",
+  "bounty": {
+    "enabled_keys": [],
+    "strategy_map": {},
+    "default_strategy": "价值",
+    "retry_when_running_sec": 30,
+    "post_finish_delay_sec": 30,
+    "next_morning_hour": 8,
+    "daily_start_time": "08:30",
+    "jitter_seconds": 600
+  },
+  "_comment_secret": "秘境模块配置；控制秘境每日启动时间和随机抖动。",
+  "secret": {
+    "daily_start_time": "12:35",
+    "jitter_seconds": 600
+  },
+  "_comment_coordinator": "任务协调器配置；控制多个自动任务之间的发送间隔和执行顺序。",
+  "coordinator": {
+    "command_delay_sec": 2.0,
+    "activity_order": [
+      "悬赏",
+      "秘境",
+      "宗门任务"
+    ]
+  },
+  "_comment_send_fail_policy": "发送失败处理策略；用于永久发送失败时自动拉黑或解绑。",
+  "send_fail_policy": {
+    "auto_block_permanent_send_error": true,
+    "auto_unbind_on_permanent_send_error": true
+  },
+  "_comment_seclusion_guard": "闭关/禁发保护配置；需要退出闭关时会按这里的策略尝试处理。",
+  "seclusion_guard": {
+    "enabled": true,
+    "prefer_sect_exit": true,
+    "retry_delay_sec": 1.5,
+    "max_exit_attempts": 2
+  },
+  "_comment_market_price": "坊市价格模块配置；原有一键上架/价格缓存使用，不参与自动炼丹的实时成本快照规则。",
+  "market_price": {
+    "enabled": true,
+    "source": "hybrid",
+    "remote_url": "",
+    "default_remote_url": "http://81.71.44.7:8808/api/prices/latest",
+    "api_key": "",
+    "local_path": "data/market_prices_cache.json",
+    "ttl_seconds": 21600,
+    "refresh_interval_sec": 300,
+    "timeout_sec": 5.0
+  },
+  "_comment_inventory_ops": "背包物品操作配置；一键上架、一键炼金、背包分页、黑白名单等原有功能使用。",
+  "inventory_ops": {
+    "enabled": true,
+    "max_market_price": 5000,
+    "send_interval_sec": 1.0,
+    "page_timeout_sec": 30.0,
+    "action_timeout_sec": 30.0,
+    "max_pages": 30,
+    "alchemy_whitelist": {
+      "丹药": []
+    },
+    "alchemy_blacklist": {
+      "装备": [],
+      "神物": []
+    },
+    "market_command_price_format": "lingshi"
+  },
+  "_comment_auto_alchemy": "自动炼丹模块配置；下面每个字段都有 _comment_ 说明，直接保留在 config.json 中也不会影响读取。",
+  "auto_alchemy": {
+    "_comment": "自动炼丹模块配置；支持批量炼丹、指定丹药炼丹、背包炼丹、暂停/继续/关闭、多轮购买等。",
+    "_comment_enabled": "自动炼丹总开关；false 时自动炼丹相关指令不执行。",
+    "enabled": true,
+    "_comment_market_pages": "坊市药材总页数；当前固定为 1-8 页。",
+    "market_pages": 8,
+    "_comment_send_interval_sec": "自动炼丹模块发送普通指令的基础间隔秒数。",
+    "send_interval_sec": 1.2,
+    "_comment_page_timeout_sec": "等待坊市/背包分页回执的超时时间秒数。",
+    "page_timeout_sec": 30.0,
+    "_comment_max_page_retries": "分页采集失败时的最大重试次数。",
+    "max_page_retries": 1,
+    "_comment_default_yield_count": "默认成丹数量；当前按 6 颗计算利润。",
+    "default_yield_count": 6,
+    "_comment_batch_buy_enabled": "开启自动炼丹后是否执行购买流程；false 时只计算/展示。",
+    "batch_buy_enabled": true,
+    "_comment_batch_buy_send_interval_sec": "批量购买时两次购买指令之间的发送间隔秒数。",
+    "batch_buy_send_interval_sec": 1.2,
+    "_comment_batch_buy_result_timeout_sec": "批量购买整体等待时间，旧字段，保留兼容。",
+    "batch_buy_result_timeout_sec": 180.0,
+    "_comment_max_profitable_report_count": "计算结果中最多展示的盈利丹方数量。",
+    "max_profitable_report_count": 30,
+    "_comment_purchase_response_timeout_sec": "购买指令发出后等待有效购买回执的时间；30 秒无有效回执则自动结束验证码空窗期，跳过当前购买并继续后续流程。",
+    "purchase_response_timeout_sec": 30.0,
+    "_comment_captcha_wait_sec": "疑似验证码等待窗口秒数；当前与 purchase_response_timeout_sec 保持 30 秒，超时后自动恢复继续。",
+    "captcha_wait_sec": 30.0,
+    "_comment_busy_retry_delay_sec": "官方回执包含“方式现在太繁忙了/坊市现在太繁忙了/现在太繁忙”时，不判定购买失败，自动等待该秒数后重试当前购买指令。",
+    "busy_retry_delay_sec": 15.0,
+    "_comment_alchemy_confirm_timeout_sec": "炼丹指令发出后等待“恭喜道友成功炼成丹药”的超时时间秒数。",
+    "alchemy_confirm_timeout_sec": 20.0,
+    "_comment_alchemy_send_interval_sec": "两次炼丹指令之间的发送间隔秒数。",
+    "alchemy_send_interval_sec": 1.2,
+    "_comment_min_profit_6pill": "6 丹利润最低阈值，单位为万；低于该值不纳入自动炼丹。",
+    "min_profit_6pill": 130,
+    "_comment_page_index_cache_enabled": "是否启用药材页码索引缓存；页码稳定时可减少每次全量查 1-8 页。",
+    "page_index_cache_enabled": true,
+    "_comment_merge_buy_queue": "是否合并同名药材购买需求；合并后仍会记录丹方材料归属。",
+    "merge_buy_queue": true,
+    "_comment_batch_mode_plan_lock": "批量模式是否使用方案锁；选定丹方后不因“不是最优”切换，只判断是否仍达利润阈值。",
+    "batch_mode_plan_lock": true,
+    "_comment_target_mode_plan_lock": "指定丹药模式是否使用方案锁；当前为 false，价格变化时只在指定丹药内部重新选最优丹方。",
+    "target_mode_plan_lock": false,
+    "_comment_batch_repeat_until_threshold": "批量模式是否允许同一丹药匹配多条盈利丹方，直到低于利润阈值。",
+    "batch_repeat_until_threshold": true,
+    "_comment_max_batch_formula_count": "开启自动炼丹批量模式最多选择多少条主丹方；历史字段名保留。8 表示本轮最多锁定 8 条主丹方。",
+    "max_batch_formula_count": 6,
+    "_comment_max_formula_per_pill": "开启自动炼丹批量模式下，每条主丹方炼制多少炉；最小按 1 处理，不支持 0 表示不限。总炉数约为 max_batch_formula_count × max_formula_per_pill。",
+    "max_formula_per_pill": 6,
+    "_comment_batch_fast_start_from_snapshot": "批量模式是否允许使用上次价格快照快速启动，避免每次固定查 8 页。",
+    "batch_fast_start_from_snapshot": true,
+    "_comment_batch_snapshot_max_age_sec": "价格快照有效期秒数；21600=6小时，0 表示只要有快照就不按时间过期。",
+    "batch_snapshot_max_age_sec": 21600,
+    "_comment_batch_refresh_selected_pages": "快速启动后是否只刷新本轮候选丹方涉及的药材页。",
+    "batch_refresh_selected_pages": true,
+    "_comment_retry_failed_after_batch": "购买失败的药材是否在第一轮批量购买结束后集中重试一轮。",
+    "retry_failed_after_batch": true,
+    "_comment_multi_round_buy_enabled": "是否启用多轮购买机制；同名药材一轮只买一次，后续需求放到下一轮。",
+    "multi_round_buy_enabled": true,
+    "_comment_refresh_pages_each_buy_round": "多轮购买时按“轮次+页码”分组刷新；每进入一个页码组购买前，先重新查看该页获取最新真实购买指令，买完本页所需药材后再看下一页。",
+    "refresh_pages_each_buy_round": true,
+    "_comment_target_unknown_price_execute": "指定丹药如果没有固定炼金售价，是否允许按最低成本丹方执行，不做利润判断。",
+    "target_unknown_price_execute": true,
+    "_comment_backpack_max_formula_count": "开启自动背包炼丹最多选择多少个可盈利丹方；背包模式不强求最高利润，优先匹配已有药材。",
+    "backpack_max_formula_count": 10,
+    "_comment_backpack_use_existing_as_free": "背包炼丹时是否用背包已有药材抵扣实际采购数量；利润成本仍按药材实时坊市价格计算。",
+    "backpack_use_existing_as_free": true,
+    "_comment_backpack_min_profit_6pill": "背包炼丹最低利润阈值，单位万；0 表示只要 6 丹利润为正就允许炼制。",
+    "backpack_min_profit_6pill": 0,
+    "_comment_backpack_require_existing_material": "背包炼丹候选丹方是否必须至少使用 1 个背包已有药材；true 时优先围绕背包库存匹配，不退化为普通坊市采购。",
+    "backpack_require_existing_material": true,
+    "_comment_dynamic_herb_buy_during_market_scan": "遍历坊市时是否动态购买符合 herb_max_prices.yaml 最高价的药材；仅对当前页生效，不触发完整多轮购买流程。",
+    "dynamic_herb_buy_during_market_scan": false,
+    "_comment_batch_mode_profit_threshold": "批量模式下丹方利润阈值，单位万灵石；低于该值的丹方不纳入批量炼丹。默认 50。",
+    "batch_mode_profit_threshold": 50,
+    "_comment_use_backpack_for_batch_mode": "批量模式是否使用背包药材抵扣采购需求；true 时背包已有药材自动抵扣缺口，只购买不足部分。",
+    "use_backpack_for_batch_mode": true
+  }
+}
