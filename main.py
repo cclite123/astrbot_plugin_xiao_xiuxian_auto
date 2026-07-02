@@ -47,8 +47,8 @@ DEFAULT_MARKET_PRICE_URL = "http://81.71.44.7:8808/api/prices/latest"
 
 __plugin_name__ = "astrbot_plugin_xiao_xiuxian_auto"
 __plugin_version__ = "1.0.0"
-__plugin_author__ = "you"
-__plugin_desc__ = "小小修仙"
+__plugin_author__ = "cclite123"
+__plugin_desc__ = "小小修仙全自动挂机插件 —— 悬赏、秘境、宗门、炼丹、签到、挖矿、灵田、闭关修炼，一键解放双手。"
 
 
 ACTIVITY_MODULE_BOUNTY = "bounty"
@@ -249,8 +249,8 @@ def _load_local_config() -> Dict[str, Any]:
 
 @register(
     "astrbot_plugin_xiao_xiuxian_auto",
-    "时光",
-    "小小修仙",
+    "cclite123",
+    "小小修仙全自动挂机插件",
     "1.0.0",
 )
 class XiaoXiuxianAuto(Star):
