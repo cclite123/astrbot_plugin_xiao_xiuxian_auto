@@ -158,5 +158,32 @@
     "batch_mode_profit_threshold": 50,
     "_comment_use_backpack_for_batch_mode": "批量模式是否使用背包药材抵扣采购需求；true 时背包已有药材自动抵扣缺口，只购买不足部分。",
     "use_backpack_for_batch_mode": true
+  },
+  "_comment_linjie_upgrade": "自动灵界升级模块；启动后先查询当前灵界数据，之后按成功回执更新缓存并按 ROI 自动升级。",
+  "linjie_upgrade": {
+    "_comment_enabled": "自动灵界升级总开关；false 时相关指令仅提示关闭。",
+    "enabled": true,
+    "_comment_reserve_lingkuang": "最低保留灵矿石数量；0 表示不保留。",
+    "reserve_lingkuang": 0,
+    "_comment_success_delay_sec": "收到升级成功回执后，间隔多少秒继续判断下一次升级。",
+    "success_delay_sec": 0.5,
+    "_comment_query_timeout_sec": "查询灵界页面后等待回执的超时时间。",
+    "query_timeout_sec": 20.0,
+    "_comment_action_timeout_sec": "发出升级指令后等待成功/失败回执的超时时间。",
+    "action_timeout_sec": 25.0,
+    "_comment_max_failures": "连续失败多少次后自动停止。",
+    "max_failures": 3,
+    "_comment_cache_ttl_sec": "灵界缓存有效期；有效期内灵界规划优先使用缓存，避免频繁查询。",
+    "cache_ttl_sec": 21600,
+    "_comment_confirm_after_success": "升级成功后是否只查询对应页面做轻量确认；默认 false，优先使用成功回执更新缓存。",
+    "confirm_after_success": false,
+    "_comment_roi_formula_source": "ROI收益计算来源；excel_formula 表示按本地 Excel 复刻公式推算，game_display 表示按游戏回执显示值推算。",
+    "roi_formula_source": "excel_formula",
+    "_comment_default_abundance": "是否默认按丰饶印记开启计算；游戏回执暂未直接给出该状态。",
+    "default_abundance": true,
+    "_comment_include_skill_training": "是否把「灵界技艺修行」纳入 ROI 候选。",
+    "include_skill_training": true,
+    "_comment_include_skill_breakthrough": "是否把「灵界技艺突破」纳入候选；当前突破成本/收益未完全确认，默认关闭。",
+    "include_skill_breakthrough": false
   }
 }

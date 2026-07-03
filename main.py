@@ -27,6 +27,7 @@ try:
     from .market_price import MarketPriceProvider
     from .inventory_ops import InventoryOpsController
     from .auto_alchemy_optimizer import AutoAlchemyOptimizer
+    from .linjie import LinjieUpgradeController, format_money as format_linjie_money
 except ImportError:
     from storage import JsonStore, make_key
     from bounty import BountyController
@@ -38,12 +39,43 @@ except ImportError:
     from market_price import MarketPriceProvider
     from inventory_ops import InventoryOpsController
     from auto_alchemy_optimizer import AutoAlchemyOptimizer
+    from linjie import LinjieUpgradeController, format_money as format_linjie_money
 
 OFFICIAL_BOT_QQ_DEFAULT = "3889001741"
 BIND_KEY = "__bound__"
 SEND_BLOCKED_KEY = "__send_blocked__"
 
 DEFAULT_MARKET_PRICE_URL = "http://81.71.44.7:8808/api/prices/latest"
+
+LINJIE_UPGRADE_CONFIG_DEFAULTS = {
+    "_comment_linjie_upgrade": "自动灵界升级模块；启动后先查询当前灵界数据，之后按成功回执更新缓存并按 ROI 自动升级。",
+    "linjie_upgrade": {
+        "_comment_enabled": "自动灵界升级总开关；false 时相关指令仅提示关闭。",
+        "enabled": True,
+        "_comment_reserve_lingkuang": "最低保留灵矿石数量；0 表示不保留。",
+        "reserve_lingkuang": 0,
+        "_comment_success_delay_sec": "收到升级成功回执后，间隔多少秒继续判断下一次升级。",
+        "success_delay_sec": 0.5,
+        "_comment_query_timeout_sec": "查询灵界页面后等待回执的超时时间。",
+        "query_timeout_sec": 20.0,
+        "_comment_action_timeout_sec": "发出升级指令后等待成功/失败回执的超时时间。",
+        "action_timeout_sec": 25.0,
+        "_comment_max_failures": "连续失败多少次后自动停止。",
+        "max_failures": 3,
+        "_comment_cache_ttl_sec": "灵界缓存有效期；有效期内灵界规划优先使用缓存，避免频繁查询。",
+        "cache_ttl_sec": 21600,
+        "_comment_confirm_after_success": "升级成功后是否只查询对应页面做轻量确认；默认 false，优先使用成功回执更新缓存。",
+        "confirm_after_success": False,
+        "_comment_roi_formula_source": "ROI收益计算来源；excel_formula 表示按本地 Excel 复刻公式推算，game_display 表示按游戏回执显示值推算。",
+        "roi_formula_source": "excel_formula",
+        "_comment_default_abundance": "是否默认按丰饶印记开启计算；游戏回执暂未直接给出该状态。",
+        "default_abundance": True,
+        "_comment_include_skill_training": "是否把「灵界技艺修行」纳入 ROI 候选。",
+        "include_skill_training": True,
+        "_comment_include_skill_breakthrough": "是否把「灵界技艺突破」纳入候选；当前突破成本/收益未完全确认，默认关闭。",
+        "include_skill_breakthrough": False,
+    },
+}
 
 __plugin_name__ = "astrbot_plugin_xiao_xiuxian_auto"
 __plugin_version__ = "1.0.0"
@@ -234,6 +266,47 @@ def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str
     return result
 
 
+def _merge_missing_dict(target: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
+    changed = False
+    for key, value in defaults.items():
+        if key not in target:
+            target[key] = value
+            changed = True
+        elif isinstance(value, dict) and isinstance(target.get(key), dict):
+            changed = _merge_missing_dict(target[key], value) or changed
+    return changed
+
+
+def _ensure_local_config_defaults() -> None:
+    path = os.path.join(_plugin_dir, "config.json")
+    data: Dict[str, Any] = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+            else:
+                logger.warning("[xiao_xiuxian_auto] config.json 不是 JSON 对象，已跳过自动补全配置。")
+                return
+        except Exception as e:
+            logger.warning(f"[xiao_xiuxian_auto] 读取 config.json 失败，已跳过自动补全配置：{e}")
+            return
+
+    if not _merge_missing_dict(data, LINJIE_UPGRADE_CONFIG_DEFAULTS):
+        return
+
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+        logger.info("[xiao_xiuxian_auto] 已自动补全 config.json 中缺失的灵界升级配置项。")
+    except Exception as e:
+        logger.warning(f"[xiao_xiuxian_auto] 自动补全 config.json 失败：{e}")
+
+
 def _load_local_config() -> Dict[str, Any]:
     path = os.path.join(_plugin_dir, "config.json")
     try:
@@ -257,6 +330,7 @@ class XiaoXiuxianAuto(Star):
 
     def __init__(self, context, config: dict | None = None):
         super().__init__(context)
+        _ensure_local_config_defaults()
         self.cfg = _deep_merge_dict(_load_local_config(), config or {})
         self.data_dir = os.path.join(_plugin_dir, "data")
         os.makedirs(self.data_dir, exist_ok=True)
@@ -355,6 +429,13 @@ class XiaoXiuxianAuto(Star):
             snapshot_path=os.path.join(self.data_dir, "auto_alchemy_snapshot.json"),
             page_index_path=os.path.join(self.data_dir, "alchemy_page_index.json"),
             config=auto_alchemy_cfg,
+            logger=logger,
+        )
+        linjie_cfg = dict(self.cfg.get("linjie_upgrade", {}) or {})
+        self.linjie = LinjieUpgradeController(
+            store=self.store,
+            official_qq=official_qq,
+            config=linjie_cfg,
             logger=logger,
         )
         logger.info(
@@ -931,6 +1012,7 @@ class XiaoXiuxianAuto(Star):
                         await self.cultivate.tick(bound_key, send_cb)
                         await self.inventory_ops.tick(bound_key, send_cb)
                         await self.auto_alchemy.tick(bound_key, send_cb)
+                        await self.linjie.tick(bound_key, send_cb)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -982,6 +1064,7 @@ class XiaoXiuxianAuto(Star):
         routine_st = await self.routine._get(key)
         sect_st = await self.sect._get(key)
         cult_st = await self.cultivate._get(key)
+        linjie_st = await self.linjie._get(key)
 
         bounty_next = "已关闭"
         if bounty_st.enabled:
@@ -1033,6 +1116,7 @@ class XiaoXiuxianAuto(Star):
                 f"💊 领丹：{routine_line('领丹', routine_st.pill_enabled, routine_st.pill_phase, routine_st.pill_action_ts, routine_st.pill_wake_ts).split('：',1)[1]}\n"
                 f"⛏️ 挖灵石：{routine_line('挖灵石', routine_st.mine_enabled, routine_st.mine_phase, routine_st.mine_action_ts, routine_st.mine_wake_ts).split('：',1)[1]}\n"
                 f"🌾 灵田：{routine_line('灵田', routine_st.farm_enabled, routine_st.farm_phase, routine_st.farm_action_ts, routine_st.farm_wake_ts).split('：',1)[1]}\n"
+                f"🏔️ 灵界升级：{self.linjie.summary_line(linjie_st)}\n"
                 f"🧘 修炼/闭关：{cult_next}")
 
 
@@ -1046,6 +1130,7 @@ class XiaoXiuxianAuto(Star):
         routine_st = await self.routine._get(key)
         sect_st = await self.sect._get(key)
         cult_st = await self.cultivate._get(key)
+        linjie_st = await self.linjie._get(key)
 
         if not sub_menu:
             return (f"📜 【小小修仙】总菜单 📜\n"
@@ -1057,6 +1142,7 @@ class XiaoXiuxianAuto(Star):
                     f"🔹 [日常]：签到{'✅' if routine_st.signin_enabled else '🛑'}({fmt_ts_compact(routine_st.sign_action_ts or routine_st.sign_wake_ts)}) 领丹{'✅' if routine_st.pill_enabled else '🛑'}({fmt_ts_compact(routine_st.pill_action_ts or routine_st.pill_wake_ts)}) 挖矿{'✅' if routine_st.mine_enabled else '🛑'}({fmt_ts_compact(routine_st.mine_action_ts or routine_st.mine_wake_ts)}) 灵田{'✅' if routine_st.farm_enabled else '🛑'}({fmt_ts_compact(routine_st.farm_action_ts or routine_st.farm_wake_ts)})\n"
                     f"🔹 [物品]：一键上架 / 一键炼金\n"
                     f"🔹 [炼丹]：开启自动炼丹 / 开启自动背包炼丹 / 开启自动购买药材 / 开启动态购买 / 自动炼丹 丹药 数量 / 暂停继续关闭\n"
+                    f"🔹 [灵界]：{'✅开启' if linjie_st.enabled else '🛑关闭'} | {self.linjie.summary_line(linjie_st)}\n"
                     f"🔹 [坊市]：刷新坊市价格 / 更新坊市价格\n"
                     f"🔹 [休息]：{cult_st.mode or '未设置'} ({'休息中' if cult_st.is_resting else '活动中'}) | 气血:{cult_st.hp_percent:.1f}%\n\n"
                     f"📖 查看详细子目录指令，请发送：\n"
@@ -1067,6 +1153,7 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 修仙菜单 修炼\n"
                     f"▶ 修仙菜单 物品\n"
                     f"▶ 修仙菜单 炼丹\n"
+                    f"▶ 修仙菜单 灵界\n"
                     f"▶ 修仙菜单 系统\n"
                     f"▶ 自动状态 / 任务状态")
 
@@ -1157,6 +1244,19 @@ class XiaoXiuxianAuto(Star):
                     "说明：开启自动炼丹会遍历坊市1-8页采集价格，然后读取背包药材进行智能抵扣，筛选利润>配置阈值的丹方；"
                     "开启自动背包炼丹只使用背包药材，不做坊市购买，盈利>10万即可匹配丹方。")
 
+        elif sub_menu == "灵界":
+            return (f"📜 【自动灵界升级模块】指令说明 📜\n"
+                    f"当前状态：{'✅开启' if linjie_st.enabled else '🛑关闭'}\n"
+                    f"运行阶段：{self.linjie.summary_line(linjie_st)}\n"
+                    f"灵矿石缓存：{format_linjie_money(linjie_st.balance)}\n\n"
+                    f"▶ 开启自动灵界升级\n"
+                    f"▶ 关闭自动灵界升级\n"
+                    f"▶ 灵界规划\n"
+                    f"▶ 灵界刷新规划\n"
+                    f"▶ 灵界规划详情\n"
+                    f"▶ 自动灵界状态\n"
+                    f"说明：启动时集中查询灵界信息，后续按成功回执更新缓存，按 ROI 性价比自动选择下一项。")
+
         elif sub_menu == "系统":
             return (f"📜 【系统模块】指令说明 📜\n"
                     f"当前绑定群：{bound_group}\n\n"
@@ -1172,7 +1272,7 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 修仙菜单")
 
         else:
-            return "❌ 未知的子目录，请输入：悬赏、秘境、宗门、日常、修炼、物品、炼丹、系统"
+            return "❌ 未知的子目录，请输入：悬赏、秘境、宗门、日常、修炼、物品、炼丹、灵界、系统"
 
     def _make_send_cb(self, key: str):
 
@@ -1244,10 +1344,12 @@ class XiaoXiuxianAuto(Star):
             "宗门任务接取", "宗门任务刷新", "宗门任务完成",
             "修仙签到", "宗门丹药领取", "挖灵石", "灵田结算",
             "我的状态", "修炼", "闭关", "出关", "宗门闭关", "宗门出关",
+            "灵界我的信息", "灵界建筑列表", "灵界升级列表", "灵界杂役名录",
+            "灵界技艺修行", "灵界技艺突破", "灵界杂役升阶", "灵界挖灵石",
         }
         if text in exact_commands:
             return True
-        return bool(re.fullmatch(r"悬赏令接取\d+|药材背包\d*|丹药背包\d*|我的背包\d*|确认坊市上架\s+.+?\s+\d+\s+\d+|炼金\s+.+?\s+\d+", text))
+        return bool(re.fullmatch(r"悬赏令接取\d+|药材背包\d*|丹药背包\d*|我的背包\d*|确认坊市上架\s+.+?\s+\d+\s+\d+|炼金\s+.+?\s+\d+|灵界建造.+?\s+\d+|灵界招募.+?\s+\d+|灵界升级建筑.+", text))
 
     def _activity_module_of(self, text: str) -> Optional[str]:
 
@@ -1891,6 +1993,12 @@ class XiaoXiuxianAuto(Star):
             elif text == "关闭自动购买药材": reply = await self.auto_alchemy.cmd_auto_buy_herbs_stop(key)
             elif text == "开启动态购买": reply = await self.auto_alchemy.cmd_toggle_dynamic_buy(True)
             elif text == "关闭动态购买": reply = await self.auto_alchemy.cmd_toggle_dynamic_buy(False)
+            elif text == "开启自动灵界升级": reply = await self.linjie.cmd_enable(key, send_cb)
+            elif text == "关闭自动灵界升级": reply = await self.linjie.cmd_disable(key)
+            elif text in ("自动灵界状态", "灵界状态"): reply = await self.linjie.cmd_status(key)
+            elif text == "灵界规划": reply = await self.linjie.cmd_plan(key, send_cb)
+            elif text == "灵界刷新规划": reply = await self.linjie.cmd_refresh_plan(key, send_cb)
+            elif text == "灵界规划详情": reply = await self.linjie.cmd_plan_detail(key, send_cb)
             elif text.startswith("一键上架"):
                 reply = await self.inventory_ops.cmd_start_market(key, text.replace("一键上架", "", 1).strip(), send_cb)
             elif text.startswith("一键炼金"):
@@ -1966,6 +2074,7 @@ class XiaoXiuxianAuto(Star):
                 await self.routine.on_official_text(key, text, send_cb)
                 await self.sect.on_official_text(key, text, send_cb)
                 await self.cultivate.on_official_text(key, text, send_cb)
+                await self.linjie.on_official_text(key, text, send_cb)
 
             await self._handle_seclusion_guard_text(key, text)
 
@@ -1992,7 +2101,7 @@ class XiaoXiuxianAuto(Star):
         gid = getattr(event.message_obj, "group_id", None)
         return f"{sid}:{gid}" if gid else f"{sid}:private:{event.get_sender_id()}"
 
-    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启自动悬赏|关闭自动悬赏|自动悬赏(修为|价值|耗时)|统计|开启自动秘境|关闭自动秘境|开启自动签到|关闭自动签到|开启自动领丹|关闭自动领丹|开启自动挖矿|关闭自动挖矿|开启自动灵田|关闭自动灵田|开启自动宗门任务|关闭自动宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启自动修炼|关闭自动修炼|开启自动闭关|关闭自动闭关|开启自动宗门闭关|关闭自动宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启自动炼丹|开启自动背包炼丹|自动炼丹 .+|暂停自动炼丹|继续自动炼丹|关闭自动炼丹|自动炼丹状态|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|自动状态|任务状态|修仙状态|修仙菜单.*)$")
+    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启自动悬赏|关闭自动悬赏|自动悬赏(修为|价值|耗时)|统计|开启自动秘境|关闭自动秘境|开启自动签到|关闭自动签到|开启自动领丹|关闭自动领丹|开启自动挖矿|关闭自动挖矿|开启自动灵田|关闭自动灵田|开启自动宗门任务|关闭自动宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启自动修炼|关闭自动修炼|开启自动闭关|关闭自动闭关|开启自动宗门闭关|关闭自动宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启自动炼丹|开启自动背包炼丹|自动炼丹 .+|暂停自动炼丹|继续自动炼丹|关闭自动炼丹|自动炼丹状态|开启自动灵界升级|关闭自动灵界升级|自动灵界状态|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|自动状态|任务状态|修仙状态|修仙菜单.*)$")
     async def on_self_command(self, event: AstrMessageEvent):
 
 
@@ -2087,6 +2196,12 @@ class XiaoXiuxianAuto(Star):
         elif text == "关闭自动购买药材": reply = await self.auto_alchemy.cmd_auto_buy_herbs_stop(key)
         elif text == "开启动态购买": reply = await self.auto_alchemy.cmd_toggle_dynamic_buy(True)
         elif text == "关闭动态购买": reply = await self.auto_alchemy.cmd_toggle_dynamic_buy(False)
+        elif text == "开启自动灵界升级": reply = await self.linjie.cmd_enable(key, send_cb)
+        elif text == "关闭自动灵界升级": reply = await self.linjie.cmd_disable(key)
+        elif text in ("自动灵界状态", "灵界状态"): reply = await self.linjie.cmd_status(key)
+        elif text == "灵界规划": reply = await self.linjie.cmd_plan(key, send_cb)
+        elif text == "灵界刷新规划": reply = await self.linjie.cmd_refresh_plan(key, send_cb)
+        elif text == "灵界规划详情": reply = await self.linjie.cmd_plan_detail(key, send_cb)
         elif text.startswith("一键上架"):
             reply = await self.inventory_ops.cmd_start_market(key, text.replace("一键上架", "", 1).strip(), send_cb)
         elif text.startswith("一键炼金"):
@@ -2161,6 +2276,7 @@ class XiaoXiuxianAuto(Star):
             await self.routine.on_official_text(key, text, send_cb)
             await self.sect.on_official_text(key, text, send_cb)
             await self.cultivate.on_official_text(key, text, send_cb)
+            await self.linjie.on_official_text(key, text, send_cb)
 
         await self._handle_seclusion_guard_text(key, text)
 
