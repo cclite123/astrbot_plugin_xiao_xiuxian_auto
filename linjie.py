@@ -290,6 +290,14 @@ class LinjieUpgradeController:
         if self.log:
             self.log.info(msg)
 
+    def _debug(self, msg: str) -> None:
+        if self.log:
+            self.log.debug(msg)
+
+    def _warning(self, msg: str) -> None:
+        if self.log:
+            self.log.warning(msg)
+
     async def _get(self, key: str) -> LinjieState:
         return LinjieState.from_dict(await self.store.get(f"linjie:{key}"))
 
@@ -653,13 +661,17 @@ class LinjieUpgradeController:
         if "个人面板" in text or "技艺道行" in text or "技艺境界" in text:
             self._parse_profile(st, text)
             kind = kind or "profile"
-        if "建筑列表" in text and "|建筑名称|" in text:
+        # 用表格表头特征词路由，避免底部链接[建筑列表](url)清理后误触发
+        # 建筑列表表头: |建筑名称|拥有|建造|单产|下一个价格|
+        # 升级列表表头: |建筑名称|建筑等级|升级价格|升级|
+        # 杂役名录表头: |建筑名称|在岗/岗位|招募|产出加成|杂役单产|下一个价格|
+        if "|拥有|" in text:
             self._parse_building_list(st, text)
             kind = "buildings"
-        if "可升级建筑" in text and "|建筑名称|" in text:
+        elif "|建筑等级|" in text:
             self._parse_tech_list(st, text)
             kind = "tech"
-        if "杂役概览" in text and "|建筑名称|" in text:
+        elif "|在岗" in text or "杂役单产" in text:
             self._parse_worker_list(st, text)
             kind = "workers"
         self._parse_any_balance(st, text)
@@ -705,19 +717,33 @@ class LinjieUpgradeController:
         return item
 
     def _parse_building_list(self, st: LinjieState, text: str) -> None:
+        parsed_any = False
         for row in self._iter_table_rows(text):
             if len(row) < 5 or row[0] == "建筑名称":
                 continue
             name, owned, _, output, price = row[:5]
             if not name or name.startswith(":-"):
                 continue
+            # 跳过杂役名录行：建筑列表的价格列必含"灵矿石"或"🔒"
+            # 杂役名录的第5列是"杂役单产"(如"23.92（👑+8.37）")，不含"灵矿石"
+            if "灵矿石" not in price and "🔒" not in price:
+                continue
+            # 跳过杂役名录行：建筑列表的拥有列含"×"或"建造"
+            # 杂役名录的第2列是"在岗/岗位"(如"43/104")，不含"×"
+            if "×" not in owned and "建造" not in owned:
+                continue
             item = self._ensure_building(st, name)
             m = re.search(r"×\s*(\d+)", owned)
             if m:
                 item["count"] = int(m.group(1))
+            else:
+                self._debug(f"[linjie] 建筑列表行count解析失败: name={name} owned={owned!r}")
             item["building_output"] = parse_output_value(output)
             item["build_cost"] = parse_money(price)
             item["build_locked"] = bool("🔒" in price)
+            parsed_any = True
+        if not parsed_any:
+            self._warning("[linjie] 建筑列表未解析到任何建筑行，可能游戏回执格式不匹配")
         m = re.search(r"总建筑数[：:]\s*(\d+)", text)
         if m:
             st.last_plan["building_total"] = int(m.group(1))
@@ -731,6 +757,9 @@ class LinjieUpgradeController:
                 continue
             name, level, price, action = row[:4]
             if not name or name.startswith(":-"):
+                continue
+            # 跳过非升级列表行：建筑列表的level列含"×"，杂役名录的含"/"
+            if "×" in level or "/" in level:
                 continue
             item = self._ensure_building(st, name)
             try:
@@ -751,6 +780,7 @@ class LinjieUpgradeController:
         m = re.search(r"杂役升阶[^\n]*?需要\s*([0-9.,]+[万亿兆京]?)\s*灵矿石", text)
         if m:
             st.worker_rank_cost = parse_money(m.group(1))
+        parsed_any = False
         for row in self._iter_table_rows(text):
             if len(row) < 6 or row[0] == "建筑名称":
                 continue
@@ -762,11 +792,16 @@ class LinjieUpgradeController:
             if m:
                 item["workers"] = int(m.group(1))
                 item["capacity"] = int(m.group(2))
+            else:
+                self._debug(f"[linjie] 杂役名录行解析失败: name={name} slot={slot!r}")
             item["worker_output"] = parse_output_value(worker_output)
             item["worker_single"] = parse_output_value(worker_single)
             item["worker_cost"] = parse_money(price)
             if item.get("count") and item.get("capacity"):
                 item["capacity_per_building"] = float(item["capacity"]) / max(1.0, float(item["count"]))
+            parsed_any = True
+        if not parsed_any:
+            self._warning("[linjie] 杂役名录未解析到任何建筑行，可能游戏回执格式不匹配")
 
     def _iter_table_rows(self, text: str) -> List[List[str]]:
         rows = []
@@ -803,7 +838,7 @@ class LinjieUpgradeController:
         if "杂役技艺提升成功" in text or "杂役升阶成功" in text:
             self._apply_rank_success(st, text)
             return "success"
-        if "技艺" in text and "成功" in text and ("道行" in text or "修行" in text or "突破" in text):
+        if "修习成功" in text or ("技艺" in text and "成功" in text and ("道行" in text or "修行" in text or "修习" in text or "突破" in text)):
             self._apply_skill_success(st, text)
             return "success"
         return ""
@@ -980,11 +1015,20 @@ class LinjieUpgradeController:
         rank = st.worker_rank if st.worker_rank >= 0 else 20
         rank_factor = _worker_rank_factor(rank)
 
+        parsed_names = set()
         for name, item in st.buildings.items():
             count = int(item.get("count", 0) or 0)
             tech = int(item.get("tech", 0) or 0)
             workers = int(item.get("workers", 0) or 0)
             capacity = int(item.get("capacity", 0) or 0)
+            if capacity <= 0 and count > 0:
+                formula_cap = CAP_PER_BUILDING.get(name, 0) * count
+                if formula_cap > 0:
+                    self._debug(
+                        f"[linjie] {name} 解析capacity={capacity}异常,回退公式={formula_cap}"
+                    )
+                    capacity = formula_cap
+            parsed_names.add(name)
 
             build_cost = float(item.get("build_cost", 0) or 0)
             if build_cost <= 0 and name in BASE_BUILD_COST:
@@ -1015,6 +1059,10 @@ class LinjieUpgradeController:
 
             if worker_cost > 0 and worker_gain > 0 and capacity > 0 and workers < capacity:
                 candidates.append(LinjieCandidate("worker", name, worker_cost, worker_gain, f"灵界招募{name} 1", f"{name}+1杂役"))
+
+        missing = [n for n in BUILDING_ORDER if n not in parsed_names]
+        if missing:
+            self._info(f"[linjie] 缓存中缺失建筑数据: {', '.join(missing)}")
 
         rank_cost = st.worker_rank_cost or (1000.0 * (2.2 ** max(rank, 0)))
         rank_gain = self._estimate_rank_gain_excel(st, rank)
@@ -1338,6 +1386,26 @@ class LinjieUpgradeController:
                 lines.append("灵符堂未进入候选：可能已满员、价格/增益为0，或当前建筑等级/数量条件不足。")
             else:
                 lines.append("灵符堂未进入候选：当前缓存没有解析到灵符堂数据。")
+
+        # 建筑数据诊断
+        lines.append("")
+        lines.append("📊 建筑数据诊断：")
+        for bname in BUILDING_ORDER:
+            item = st.buildings.get(bname)
+            if not item:
+                lines.append(f"  {bname}: ❌未获取")
+                continue
+            count = int(item.get("count", 0) or 0)
+            tech = int(item.get("tech", 0) or 0)
+            workers = int(item.get("workers", 0) or 0)
+            cap = int(item.get("capacity", 0) or 0)
+            if cap <= 0 and count > 0:
+                cap = CAP_PER_BUILDING.get(bname, 0) * count
+                cap_mark = f"{cap}(公式回退)"
+            else:
+                cap_mark = str(cap)
+            locked = "🔒" if item.get("build_locked") else ""
+            lines.append(f"  {bname}: 数量{count} 等级{tech} 杂役{workers}/{cap_mark} {locked}")
         # 追加多步序列摘要
         steps = self._simulate_multi_step_plan(st)
         if steps:
