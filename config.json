@@ -184,6 +184,8 @@
     "_comment_include_skill_training": "是否把「灵界技艺修行」纳入 ROI 候选。",
     "include_skill_training": true,
     "_comment_include_skill_breakthrough": "是否把「灵界技艺突破」纳入候选；当前突破成本/收益未完全确认，默认关闭。",
-    "include_skill_breakthrough": false
+    "include_skill_breakthrough": false,
+    "_comment_max_sim_steps": "多步滚动 ROI 模拟最大步数；默认15步，用于「灵界规划序列」和「灵界规划详情」。",
+    "max_sim_steps": 15
   }
 }

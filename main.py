@@ -74,6 +74,8 @@ LINJIE_UPGRADE_CONFIG_DEFAULTS = {
         "include_skill_training": True,
         "_comment_include_skill_breakthrough": "是否把「灵界技艺突破」纳入候选；当前突破成本/收益未完全确认，默认关闭。",
         "include_skill_breakthrough": False,
+        "_comment_max_sim_steps": "多步滚动 ROI 模拟最大步数；默认15步，用于「灵界规划序列」和「灵界规划详情」。",
+        "max_sim_steps": 15,
     },
 }
 
@@ -1254,6 +1256,7 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 灵界规划\n"
                     f"▶ 灵界刷新规划\n"
                     f"▶ 灵界规划详情\n"
+                    f"▶ 灵界规划序列\n"
                     f"▶ 自动灵界状态\n"
                     f"说明：启动时集中查询灵界信息，后续按成功回执更新缓存，按 ROI 性价比自动选择下一项。")
 
@@ -1999,6 +2002,7 @@ class XiaoXiuxianAuto(Star):
             elif text == "灵界规划": reply = await self.linjie.cmd_plan(key, send_cb)
             elif text == "灵界刷新规划": reply = await self.linjie.cmd_refresh_plan(key, send_cb)
             elif text == "灵界规划详情": reply = await self.linjie.cmd_plan_detail(key, send_cb)
+            elif text == "灵界规划序列": reply = await self.linjie.cmd_plan_sequence(key, send_cb)
             elif text.startswith("一键上架"):
                 reply = await self.inventory_ops.cmd_start_market(key, text.replace("一键上架", "", 1).strip(), send_cb)
             elif text.startswith("一键炼金"):
@@ -2202,6 +2206,7 @@ class XiaoXiuxianAuto(Star):
         elif text == "灵界规划": reply = await self.linjie.cmd_plan(key, send_cb)
         elif text == "灵界刷新规划": reply = await self.linjie.cmd_refresh_plan(key, send_cb)
         elif text == "灵界规划详情": reply = await self.linjie.cmd_plan_detail(key, send_cb)
+        elif text == "灵界规划序列": reply = await self.linjie.cmd_plan_sequence(key, send_cb)
         elif text.startswith("一键上架"):
             reply = await self.inventory_ops.cmd_start_market(key, text.replace("一键上架", "", 1).strip(), send_cb)
         elif text.startswith("一键炼金"):

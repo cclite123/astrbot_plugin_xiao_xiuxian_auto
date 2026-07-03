@@ -284,6 +284,7 @@ class LinjieUpgradeController:
         self.default_abundance = bool(cfg.get("default_abundance", True))
         self.include_skill_training = bool(cfg.get("include_skill_training", True))
         self.include_skill_breakthrough = bool(cfg.get("include_skill_breakthrough", False))
+        self.max_sim_steps = max(3, int(cfg.get("max_sim_steps", 15)))
 
     def _info(self, msg: str) -> None:
         if self.log:
@@ -369,6 +370,14 @@ class LinjieUpgradeController:
         self._start_query(st, "PLAN_DETAIL")
         await self._set(key, st)
         return "🔎 当前没有可用灵界缓存，正在查询后输出规划详情。"
+
+    async def cmd_plan_sequence(self, key: str, send_cb) -> str:
+        st = await self._get(key)
+        if self._cache_fresh(st):
+            return self._format_plan_sequence_reply(st)
+        self._start_query(st, "PLAN_SEQUENCE")
+        await self._set(key, st)
+        return "🔎 当前没有可用灵界缓存，正在查询后输出多步规划序列。"
 
     def summary_line(self, st: LinjieState) -> str:
         if not st.enabled:
@@ -471,6 +480,13 @@ class LinjieUpgradeController:
             await self._set(key, st)
             if send_cb:
                 await send_cb(self._format_plan_detail_reply(st))
+            return
+        if after_query == "PLAN_SEQUENCE":
+            st.phase = "IDLE" if not st.enabled else "RUNNING"
+            st.next_action_ts = 0.0 if not st.enabled else time.time() + self.success_delay_sec
+            await self._set(key, st)
+            if send_cb:
+                await send_cb(self._format_plan_sequence_reply(st))
             return
         st.phase = "RUNNING" if st.enabled else "IDLE"
         st.next_action_ts = time.time() + self.success_delay_sec if st.enabled else 0.0
@@ -933,8 +949,6 @@ class LinjieUpgradeController:
             worker_gain = float(item.get("worker_single", 0) or 0)
             workers = int(item.get("workers", 0) or 0)
             capacity = int(item.get("capacity", 0) or 0)
-            if worker_cost > 0 and worker_gain > 0 and (not capacity or workers < capacity):
-                candidates.append(LinjieCandidate("worker", name, worker_cost, worker_gain, f"灵界招募{name} 1", f"{name}+1杂役"))
 
             tech_cost = float(item.get("tech_cost", 0) or 0)
             if item.get("tech_available") and tech_cost > 0:
@@ -942,6 +956,9 @@ class LinjieUpgradeController:
                 if gain > 0:
                     tech = int(item.get("tech", 0) or 0)
                     candidates.append(LinjieCandidate("tech", name, tech_cost, gain, f"灵界升级建筑{name}", f"{name}建筑等级 {tech}→{tech + 1}"))
+
+            if worker_cost > 0 and worker_gain > 0 and capacity > 0 and workers < capacity:
+                candidates.append(LinjieCandidate("worker", name, worker_cost, worker_gain, f"灵界招募{name} 1", f"{name}+1杂役"))
 
         if st.worker_rank_cost > 0:
             gain = self._estimate_rank_gain(st)
@@ -986,8 +1003,6 @@ class LinjieUpgradeController:
                 * abundance_factor
                 * monthly_factor
             )
-            if worker_cost > 0 and worker_gain > 0 and (not capacity or workers < capacity):
-                candidates.append(LinjieCandidate("worker", name, worker_cost, worker_gain, f"灵界招募{name} 1", f"{name}+1杂役"))
 
             tech_cost = float(item.get("tech_cost", 0) or 0)
             if tech_cost <= 0 and name in TECH_BASE_COST:
@@ -997,6 +1012,9 @@ class LinjieUpgradeController:
                 gain = self._estimate_tech_gain_excel(name, count, tech, workers, rank, st.abundance, st.monthly_card)
                 if gain > 0:
                     candidates.append(LinjieCandidate("tech", name, tech_cost, gain, f"灵界升级建筑{name}", f"{name}建筑等级 {tech}→{tech + 1}"))
+
+            if worker_cost > 0 and worker_gain > 0 and capacity > 0 and workers < capacity:
+                candidates.append(LinjieCandidate("worker", name, worker_cost, worker_gain, f"灵界招募{name} 1", f"{name}+1杂役"))
 
         rank_cost = st.worker_rank_cost or (1000.0 * (2.2 ** max(rank, 0)))
         rank_gain = self._estimate_rank_gain_excel(st, rank)
@@ -1009,6 +1027,174 @@ class LinjieUpgradeController:
             candidates.append(LinjieCandidate("skill", "技艺道行", cost, gain, "灵界技艺修行", f"技艺道行 {st.skill_dao}→{st.skill_dao + 1}"))
 
         return [c for c in candidates if c.cost > 0 and c.gain > 0]
+
+    # ── 多步 ROI 滚动模拟 ──────────────────────────────────────────
+
+    def _simulate_multi_step_plan(self, st: LinjieState) -> List[Dict[str, Any]]:
+        """多步滚动 ROI 贪心模拟，与 Excel 保持一致。
+        每一步：从当前模拟态生成全部候选 → 选 ROI 最优 → 应用状态变更 → 进入下一步。
+        """
+        sim_buildings: Dict[str, Dict[str, Any]] = {}
+        for name, item in st.buildings.items():
+            sim_buildings[name] = {
+                "count": int(item.get("count", 0) or 0),
+                "tech": int(item.get("tech", 0) or 0),
+                "workers": int(item.get("workers", 0) or 0),
+                "build_locked": bool(item.get("build_locked", False)),
+            }
+        sim_state: Dict[str, Any] = {
+            "balance": float(st.balance),
+            "worker_rank": st.worker_rank if st.worker_rank >= 0 else 20,
+            "skill_dao": st.skill_dao,
+        }
+
+        steps: List[Dict[str, Any]] = []
+        for _ in range(self.max_sim_steps):
+            candidates = self._sim_build_candidates(
+                sim_buildings, sim_state["balance"],
+                sim_state["worker_rank"], sim_state["skill_dao"],
+                st.abundance, st.monthly_card,
+            )
+            if not candidates:
+                break
+            # 与 Excel 一致：在所有候选中选 ROI 最优，不管当前余额是否足够
+            best = min(candidates, key=lambda c: c.roi_days)
+            step_data = self._candidate_to_dict(best)
+            # 记录是否可负担及等待时间
+            if sim_state["balance"] >= best.cost:
+                step_data["affordable"] = True
+                step_data["wait_sec"] = 0.0
+            else:
+                step_data["affordable"] = False
+                speed = max(1.0, float(st.total_speed or 0.0))
+                step_data["wait_sec"] = (best.cost - sim_state["balance"]) / speed
+            steps.append(step_data)
+            self._sim_apply_step(sim_buildings, sim_state, best)
+            # Excel 逻辑：可负担时扣除成本，不可负担时余额清零
+            if sim_state["balance"] >= best.cost:
+                sim_state["balance"] -= best.cost
+            else:
+                sim_state["balance"] = 0.0
+        return steps
+
+    def _sim_build_candidates(
+        self,
+        buildings: Dict[str, Dict[str, Any]],
+        balance: float,
+        worker_rank: int,
+        skill_dao: int,
+        abundance: bool,
+        monthly_card: bool,
+    ) -> List[LinjieCandidate]:
+        """基于模拟态生成候选，公式与 _build_candidates_excel 完全一致。"""
+        candidates: List[LinjieCandidate] = []
+        monthly_factor = 1.35 if monthly_card else 1.0
+        abundance_factor = 1.0 if abundance else 1.0 / 1.05
+        rank_factor = _worker_rank_factor(worker_rank)
+
+        for name, item in buildings.items():
+            count = int(item.get("count", 0))
+            tech = int(item.get("tech", 0))
+            workers = int(item.get("workers", 0))
+            cap = CAP_PER_BUILDING.get(name, 0) * count
+
+            # 建筑+1
+            build_cost = BASE_BUILD_COST.get(name, 0.0) * (1.25 ** count)
+            build_gain = BASE_OUTPUT.get(name, 0.0) * (tech + 1) * abundance_factor * monthly_factor
+            if build_cost > 0 and build_gain > 0 and not item.get("build_locked"):
+                candidates.append(LinjieCandidate(
+                    "building", name, build_cost, build_gain,
+                    f"灵界建造{name} 1", f"{name}+1座",
+                ))
+
+            # 杂役+1
+            worker_cost = BASE_WORKER_COST.get(name, 0.0) * (1.1 ** workers)
+            worker_gain = (
+                BASE_WORKER_OUTPUT.get(name, 0.0)
+                * _worker_tech_factor(name, tech)
+                * rank_factor
+                * abundance_factor
+                * monthly_factor
+            )
+
+            # 建筑技艺
+            tech_cost = TECH_BASE_COST.get(name, 0.0) * (10 ** tech)
+            tech_limit = min(6, count // 10)
+            if tech < 6 and tech < tech_limit and tech_cost > 0:
+                gain = self._estimate_tech_gain_excel(
+                    name, count, tech, workers, worker_rank, abundance, monthly_card,
+                )
+                if gain > 0:
+                    candidates.append(LinjieCandidate(
+                        "tech", name, tech_cost, gain,
+                        f"灵界升级建筑{name}", f"{name}建筑等级 {tech}→{tech + 1}",
+                    ))
+
+            if worker_cost > 0 and worker_gain > 0 and cap > 0 and workers < cap:
+                candidates.append(LinjieCandidate(
+                    "worker", name, worker_cost, worker_gain,
+                    f"灵界招募{name} 1", f"{name}+1杂役",
+                ))
+
+        # 杂役等阶
+        rank_cost = 1000.0 * (2.2 ** max(worker_rank, 0))
+        rank_gain = self._estimate_rank_gain_from_sim(
+            buildings, worker_rank, abundance, monthly_card,
+        )
+        if rank_cost > 0 and rank_gain > 0:
+            candidates.append(LinjieCandidate(
+                "rank", "杂役等阶", rank_cost, rank_gain,
+                "灵界杂役升阶", f"杂役等阶 LV{worker_rank}→LV{worker_rank + 1}",
+            ))
+
+        # 技艺道行
+        if self.include_skill_training and skill_dao >= 0:
+            cost = 15.0 * (1.2 ** skill_dao)
+            gain = (0.01 * skill_dao + 0.1) * monthly_factor
+            candidates.append(LinjieCandidate(
+                "skill", "技艺道行", cost, gain,
+                "灵界技艺修行", f"技艺道行 {skill_dao}→{skill_dao + 1}",
+            ))
+
+        return [c for c in candidates if c.cost > 0 and c.gain > 0]
+
+    def _estimate_rank_gain_from_sim(
+        self,
+        buildings: Dict[str, Dict[str, Any]],
+        rank: int,
+        abundance: bool,
+        monthly_card: bool,
+    ) -> float:
+        abundance_factor = 1.0 if abundance else 1.0 / 1.05
+        monthly_factor = 1.35 if monthly_card else 1.0
+        total = 0.0
+        for name, item in buildings.items():
+            workers = int(item.get("workers", 0))
+            tech = int(item.get("tech", 0))
+            total += workers * BASE_WORKER_OUTPUT.get(name, 0.0) * _worker_tech_factor(name, tech)
+        return total * (_worker_rank_factor(rank + 1) - _worker_rank_factor(rank)) * abundance_factor * monthly_factor
+
+    def _sim_apply_step(
+        self,
+        buildings: Dict[str, Dict[str, Any]],
+        sim_state: Dict[str, Any],
+        cand: LinjieCandidate,
+    ) -> None:
+        """将候选操作应用到模拟态，更新建筑数量/技艺/杂役等。"""
+        name = cand.name
+        item = buildings.setdefault(name, {
+            "count": 0, "tech": 0, "workers": 0, "build_locked": False,
+        })
+        if cand.kind == "building":
+            item["count"] = int(item.get("count", 0)) + 1
+        elif cand.kind == "tech":
+            item["tech"] = int(item.get("tech", 0)) + 1
+        elif cand.kind == "worker":
+            item["workers"] = int(item.get("workers", 0)) + 1
+        elif cand.kind == "rank":
+            sim_state["worker_rank"] = int(sim_state.get("worker_rank", 20)) + 1
+        elif cand.kind == "skill":
+            sim_state["skill_dao"] = int(sim_state.get("skill_dao", 0)) + 1
 
     def _estimate_tech_gain(self, name: str, item: Dict[str, Any]) -> float:
         tech = int(item.get("tech", 0) or 0)
@@ -1152,6 +1338,68 @@ class LinjieUpgradeController:
                 lines.append("灵符堂未进入候选：可能已满员、价格/增益为0，或当前建筑等级/数量条件不足。")
             else:
                 lines.append("灵符堂未进入候选：当前缓存没有解析到灵符堂数据。")
+        # 追加多步序列摘要
+        steps = self._simulate_multi_step_plan(st)
+        if steps:
+            lines.append("")
+            lines.append("🔢 多步滚动模拟前5步：")
+            remaining = float(st.balance)
+            for idx, step in enumerate(steps[:5], 1):
+                cost = float(step.get("cost", 0))
+                gain = float(step.get("gain", 0))
+                roi = cost / gain / 86400.0 if gain > 0 else float("inf")
+                affordable = bool(step.get("affordable", True))
+                if affordable:
+                    remaining = max(0.0, remaining - cost)
+                else:
+                    remaining = 0.0
+                lines.append(
+                    f"  {idx}. {'\u2705' if affordable else '\u23f3'} {step.get('note')} "
+                    f"成本{format_money(cost)} 增产{format_speed(gain)} ROI{roi:.2f}天"
+                )
+            if len(steps) > 5:
+                lines.append(f"  …完整序列共{len(steps)}步，使用「灵界规划序列」查看全部。")
+        return "\n".join(lines)
+
+    def _format_plan_sequence_reply(self, st: LinjieState) -> str:
+        steps = self._simulate_multi_step_plan(st)
+        if not steps:
+            return "📋【灵界规划序列】当前缓存没有可规划的模拟步骤。"
+        lines = [
+            "📋【灵界规划序列】多步 ROI 滚动模拟",
+            f"ROI模式：{'Excel公式' if self.roi_formula_source != 'game_display' else '游戏显示值'}",
+            f"灵矿石：{format_money(st.balance)}，月卡：{'是' if st.monthly_card else '否'}，丰饶：{'是' if st.abundance else '否'}，杂役等阶：LV{st.worker_rank if st.worker_rank >= 0 else '未知'}",
+            "",
+        ]
+        remaining = float(st.balance)
+        total_cost = 0.0
+        total_gain = 0.0
+        for idx, step in enumerate(steps, 1):
+            cost = float(step.get("cost", 0))
+            gain = float(step.get("gain", 0))
+            roi = cost / gain / 86400.0 if gain > 0 else float("inf")
+            affordable = bool(step.get("affordable", True))
+            wait_sec = float(step.get("wait_sec", 0.0))
+            if affordable:
+                remaining = max(0.0, remaining - cost)
+            else:
+                remaining = 0.0
+            total_cost += cost
+            total_gain += gain
+            wait_tag = "" if affordable else f"(攒矿{format_duration(wait_sec)})"
+            lines.append(
+                f"{idx}. {'\u2705' if affordable else '\u23f3'} {step.get('note')} "
+                f"成本{format_money(cost)} 增产{format_speed(gain)} "
+                f"ROI{roi:.2f}天 {wait_tag}"
+            )
+        lines.append("")
+        if total_gain > 0:
+            overall_roi = total_cost / total_gain / 86400.0
+            lines.append(f"合计：{len(steps)}步 总成本{format_money(total_cost)} 总增产{format_speed(total_gain)} 综合ROI{overall_roi:.2f}天")
+        if total_cost > st.balance:
+            shortage = total_cost - st.balance
+            wait_sec = self._estimate_wait_seconds(st, total_cost)
+            lines.append(f"总成本超出{format_money(shortage)}，预计攒矿{format_duration(wait_sec)}")
         return "\n".join(lines)
 
     async def _stop_for_failures(self, key: str, st: LinjieState, send_cb, reason: str) -> None:
