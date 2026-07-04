@@ -409,14 +409,32 @@ class LinjieUpgradeController:
         return {"RUNNING": "运行中", "IDLE": "待机"}.get(st.phase, st.phase or "待机")
 
     def _start_query(self, st: LinjieState, after_query: str, commands: Optional[List[str]] = None) -> None:
+        query_commands = list(commands or QUERY_COMMANDS)
         st.phase = "QUERYING"
         st.query_index = 0
         st.awaiting_query = ""
         st.after_query = after_query
-        st.query_commands = list(commands or QUERY_COMMANDS)
+        st.query_commands = query_commands
         st.next_action_ts = time.time()
         st.wake_at_ts = 0.0
         st.pending_action = {}
+        if query_commands == QUERY_COMMANDS:
+            self._reset_snapshot_cache(st)
+
+    def _reset_snapshot_cache(self, st: LinjieState) -> None:
+        st.balance = 0.0
+        st.total_speed = 0.0
+        st.skill_dao = -1
+        st.skill_realm = -1
+        st.worker_rank = -1
+        st.worker_total = 0
+        st.worker_capacity = 0
+        st.worker_rank_cost = 0.0
+        st.monthly_card = False
+        st.abundance = self.default_abundance
+        st.buildings = {}
+        st.last_plan = {}
+        st.last_query_ts = 0.0
 
     async def tick(self, key: str, send_cb) -> None:
         st = await self._get(key)
