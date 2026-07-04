@@ -961,11 +961,9 @@ class LinjieUpgradeController:
         if not candidates:
             return None, False
         spendable = max(0.0, st.balance - self.reserve_lingkuang)
-        affordable = [c for c in candidates if c.cost <= spendable and c.command not in st.blocked_commands]
-        if affordable:
-            return min(affordable, key=lambda c: c.roi_days), True
         unblocked = [c for c in candidates if c.command not in st.blocked_commands] or candidates
-        return min(unblocked, key=lambda c: c.roi_days), False
+        best = min(unblocked, key=lambda c: c.roi_days)
+        return best, best.cost <= spendable
 
     def _build_candidates(self, st: LinjieState) -> List[LinjieCandidate]:
         if self.roi_formula_source != "game_display":
