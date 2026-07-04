@@ -28,6 +28,7 @@ try:
     from .inventory_ops import InventoryOpsController
     from .auto_alchemy_optimizer import AutoAlchemyOptimizer
     from .linjie import LinjieUpgradeController, format_money as format_linjie_money
+    from .endless import EndlessTowerController
 except ImportError:
     from storage import JsonStore, make_key
     from bounty import BountyController
@@ -40,6 +41,7 @@ except ImportError:
     from inventory_ops import InventoryOpsController
     from auto_alchemy_optimizer import AutoAlchemyOptimizer
     from linjie import LinjieUpgradeController, format_money as format_linjie_money
+    from endless import EndlessTowerController
 
 OFFICIAL_BOT_QQ_DEFAULT = "3889001741"
 BIND_KEY = "__bound__"
@@ -76,6 +78,28 @@ LINJIE_UPGRADE_CONFIG_DEFAULTS = {
         "include_skill_breakthrough": False,
         "_comment_max_sim_steps": "多步滚动 ROI 模拟最大步数；默认15步，用于「灵界规划序列」和「灵界规划详情」。",
         "max_sim_steps": 15,
+    },
+}
+
+ENDLESS_TOWER_CONFIG_DEFAULTS = {
+    "_comment_endless_tower": "自动无尽妖塔模块；支持限定挑战次数、真元检测和真元不足时宗门闭关恢复。",
+    "endless_tower": {
+        "_comment_enabled": "自动无尽妖塔总开关；false 时相关指令仅提示关闭。",
+        "enabled": True,
+        "_comment_mp_check_enabled": "默认是否开启真元检测；可通过指令 开启/关闭无尽真元检测 调整。",
+        "mp_check_enabled": True,
+        "_comment_mp_threshold": "真元检测阈值，范围 0-9999；低于该百分比时先宗门闭关恢复。",
+        "mp_threshold": 600,
+        "_comment_rest_duration_sec": "真元不足时宗门闭关持续秒数；7分钟10秒为 430。",
+        "rest_duration_sec": 430,
+        "_comment_action_delay_sec": "每次成功或状态切换后，间隔多少秒继续下一步。",
+        "action_delay_sec": 1.0,
+        "_comment_status_timeout_sec": "发送 我的状态 后等待回执的超时时间。",
+        "status_timeout_sec": 20.0,
+        "_comment_challenge_timeout_sec": "发送 挑战无尽妖塔 后等待回执的超时时间。",
+        "challenge_timeout_sec": 60.0,
+        "_comment_max_failures": "连续超时或解析失败多少次后自动停止。",
+        "max_failures": 3,
     },
 }
 
@@ -295,7 +319,9 @@ def _ensure_local_config_defaults() -> None:
             logger.warning(f"[xiao_xiuxian_auto] 读取 config.json 失败，已跳过自动补全配置：{e}")
             return
 
-    if not _merge_missing_dict(data, LINJIE_UPGRADE_CONFIG_DEFAULTS):
+    changed = _merge_missing_dict(data, LINJIE_UPGRADE_CONFIG_DEFAULTS)
+    changed = _merge_missing_dict(data, ENDLESS_TOWER_CONFIG_DEFAULTS) or changed
+    if not changed:
         return
 
     try:
@@ -304,7 +330,7 @@ def _ensure_local_config_defaults() -> None:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
         os.replace(tmp, path)
-        logger.info("[xiao_xiuxian_auto] 已自动补全 config.json 中缺失的灵界升级配置项。")
+        logger.info("[xiao_xiuxian_auto] 已自动补全 config.json 中缺失的模块配置项。")
     except Exception as e:
         logger.warning(f"[xiao_xiuxian_auto] 自动补全 config.json 失败：{e}")
 
@@ -438,6 +464,13 @@ class XiaoXiuxianAuto(Star):
             store=self.store,
             official_qq=official_qq,
             config=linjie_cfg,
+            logger=logger,
+        )
+        endless_cfg = dict(self.cfg.get("endless_tower", {}) or {})
+        self.endless = EndlessTowerController(
+            store=self.store,
+            official_qq=official_qq,
+            config=endless_cfg,
             logger=logger,
         )
         logger.info(
@@ -1015,6 +1048,7 @@ class XiaoXiuxianAuto(Star):
                         await self.inventory_ops.tick(bound_key, send_cb)
                         await self.auto_alchemy.tick(bound_key, send_cb)
                         await self.linjie.tick(bound_key, send_cb)
+                        await self.endless.tick(bound_key, send_cb)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1067,6 +1101,7 @@ class XiaoXiuxianAuto(Star):
         sect_st = await self.sect._get(key)
         cult_st = await self.cultivate._get(key)
         linjie_st = await self.linjie._get(key)
+        endless_st = await self.endless._get(key)
 
         bounty_next = "已关闭"
         if bounty_st.enabled:
@@ -1109,6 +1144,12 @@ class XiaoXiuxianAuto(Star):
         cult_next = "已关闭"
         if cult_st.mode:
             cult_next = f"{cult_st.mode} / {'休息中' if cult_st.is_resting else '活动中'}，气血 {cult_st.hp_percent:.1f}%"
+        endless_next = self._next_text(
+            endless_st.enabled,
+            endless_st.phase,
+            action_ts=endless_st.next_action_ts,
+            wake_ts=endless_st.wake_at_ts,
+        )
 
         return ("📊 【自动任务状态总览】\n"
                 f"🎯 悬赏：{bounty_next}\n"
@@ -1119,6 +1160,7 @@ class XiaoXiuxianAuto(Star):
                 f"⛏️ 挖灵石：{routine_line('挖灵石', routine_st.mine_enabled, routine_st.mine_phase, routine_st.mine_action_ts, routine_st.mine_wake_ts).split('：',1)[1]}\n"
                 f"🌾 灵田：{routine_line('灵田', routine_st.farm_enabled, routine_st.farm_phase, routine_st.farm_action_ts, routine_st.farm_wake_ts).split('：',1)[1]}\n"
                 f"🏔️ 灵界升级：{self.linjie.summary_line(linjie_st)}\n"
+                f"🗼 无尽妖塔：{endless_next}，进度 {endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'}\n"
                 f"🧘 修炼/闭关：{cult_next}")
 
 
@@ -1133,6 +1175,7 @@ class XiaoXiuxianAuto(Star):
         sect_st = await self.sect._get(key)
         cult_st = await self.cultivate._get(key)
         linjie_st = await self.linjie._get(key)
+        endless_st = await self.endless._get(key)
 
         if not sub_menu:
             return (f"📜 【小小修仙】总菜单 📜\n"
@@ -1145,6 +1188,7 @@ class XiaoXiuxianAuto(Star):
                     f"🔹 [物品]：一键上架 / 一键炼金\n"
                     f"🔹 [炼丹]：开启自动炼丹 / 开启自动背包炼丹 / 开启自动购买药材 / 开启动态购买 / 自动炼丹 丹药 数量 / 暂停继续关闭\n"
                     f"🔹 [灵界]：{'✅开启' if linjie_st.enabled else '🛑关闭'} | {self.linjie.summary_line(linjie_st)}\n"
+                    f"🔹 [无尽]：{'✅开启' if endless_st.enabled else '🛑关闭'} | 进度:{endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'} 真元检测:{'✅' if endless_st.check_mp_enabled else '🛑'}({endless_st.mp_threshold}%)\n"
                     f"🔹 [坊市]：刷新坊市价格 / 更新坊市价格\n"
                     f"🔹 [休息]：{cult_st.mode or '未设置'} ({'休息中' if cult_st.is_resting else '活动中'}) | 气血:{cult_st.hp_percent:.1f}%\n\n"
                     f"📖 查看详细子目录指令，请发送：\n"
@@ -1156,6 +1200,7 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 修仙菜单 物品\n"
                     f"▶ 修仙菜单 炼丹\n"
                     f"▶ 修仙菜单 灵界\n"
+                    f"▶ 修仙菜单 无尽\n"
                     f"▶ 修仙菜单 系统\n"
                     f"▶ 自动状态 / 任务状态")
 
@@ -1260,6 +1305,19 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 自动灵界状态\n"
                     f"说明：启动时集中查询灵界信息，后续按成功回执更新缓存，按 ROI 性价比自动选择下一项。")
 
+        elif sub_menu == "无尽":
+            last_mp = "未知" if endless_st.last_mp < 0 else f"{endless_st.last_mp:g}%"
+            return (f"📜 【自动无尽妖塔模块】指令说明 📜\n"
+                    f"当前状态：{'✅开启' if endless_st.enabled else '🛑关闭'}\n"
+                    f"挑战进度：{endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'}\n"
+                    f"真元检测：{'✅开启' if endless_st.check_mp_enabled else '🛑关闭'}，阈值：{endless_st.mp_threshold}%，最近真元：{last_mp}\n\n"
+                    f"▶ 开启自动无尽\n"
+                    f"▶ 开启自动无尽 100\n"
+                    f"▶ 关闭自动无尽\n"
+                    f"▶ 开启无尽真元检测 / 关闭无尽真元检测\n"
+                    f"▶ 设置无尽真元检测 600\n"
+                    f"▶ 自动无尽状态")
+
         elif sub_menu == "系统":
             return (f"📜 【系统模块】指令说明 📜\n"
                     f"当前绑定群：{bound_group}\n\n"
@@ -1275,7 +1333,7 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 修仙菜单")
 
         else:
-            return "❌ 未知的子目录，请输入：悬赏、秘境、宗门、日常、修炼、物品、炼丹、灵界、系统"
+            return "❌ 未知的子目录，请输入：悬赏、秘境、宗门、日常、修炼、物品、炼丹、灵界、无尽、系统"
 
     def _make_send_cb(self, key: str):
 
@@ -1347,6 +1405,7 @@ class XiaoXiuxianAuto(Star):
             "宗门任务接取", "宗门任务刷新", "宗门任务完成",
             "修仙签到", "宗门丹药领取", "挖灵石", "灵田结算",
             "我的状态", "修炼", "闭关", "出关", "宗门闭关", "宗门出关",
+            "挑战无尽妖塔",
             "灵界我的信息", "灵界建筑列表", "灵界升级列表", "灵界杂役名录",
             "灵界技艺修行", "灵界技艺突破", "灵界杂役升阶", "灵界挖灵石",
         }
@@ -2003,6 +2062,14 @@ class XiaoXiuxianAuto(Star):
             elif text == "灵界刷新规划": reply = await self.linjie.cmd_refresh_plan(key, send_cb)
             elif text == "灵界规划详情": reply = await self.linjie.cmd_plan_detail(key, send_cb)
             elif text == "灵界规划序列": reply = await self.linjie.cmd_plan_sequence(key, send_cb)
+            elif text.startswith("开启自动无尽"):
+                reply = await self.endless.cmd_enable(key, text.replace("开启自动无尽", "", 1).strip(), send_cb)
+            elif text == "关闭自动无尽": reply = await self.endless.cmd_disable(key)
+            elif text in ("自动无尽状态", "无尽状态"): reply = await self.endless.cmd_status(key)
+            elif text == "开启无尽真元检测": reply = await self.endless.cmd_enable_mp_check(key)
+            elif text == "关闭无尽真元检测": reply = await self.endless.cmd_disable_mp_check(key)
+            elif text.startswith("设置无尽真元检测"):
+                reply = await self.endless.cmd_set_mp_threshold(key, text.replace("设置无尽真元检测", "", 1).strip())
             elif text.startswith("一键上架"):
                 reply = await self.inventory_ops.cmd_start_market(key, text.replace("一键上架", "", 1).strip(), send_cb)
             elif text.startswith("一键炼金"):
@@ -2079,6 +2146,7 @@ class XiaoXiuxianAuto(Star):
                 await self.sect.on_official_text(key, text, send_cb)
                 await self.cultivate.on_official_text(key, text, send_cb)
                 await self.linjie.on_official_text(key, text, send_cb)
+                await self.endless.on_official_text(key, text, send_cb)
 
             await self._handle_seclusion_guard_text(key, text)
 
@@ -2105,7 +2173,7 @@ class XiaoXiuxianAuto(Star):
         gid = getattr(event.message_obj, "group_id", None)
         return f"{sid}:{gid}" if gid else f"{sid}:private:{event.get_sender_id()}"
 
-    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启自动悬赏|关闭自动悬赏|自动悬赏(修为|价值|耗时)|统计|开启自动秘境|关闭自动秘境|开启自动签到|关闭自动签到|开启自动领丹|关闭自动领丹|开启自动挖矿|关闭自动挖矿|开启自动灵田|关闭自动灵田|开启自动宗门任务|关闭自动宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启自动修炼|关闭自动修炼|开启自动闭关|关闭自动闭关|开启自动宗门闭关|关闭自动宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启自动炼丹|开启自动背包炼丹|自动炼丹 .+|暂停自动炼丹|继续自动炼丹|关闭自动炼丹|自动炼丹状态|开启自动灵界升级|关闭自动灵界升级|自动灵界状态|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|自动状态|任务状态|修仙状态|修仙菜单.*)$")
+    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启自动悬赏|关闭自动悬赏|自动悬赏(修为|价值|耗时)|统计|开启自动秘境|关闭自动秘境|开启自动签到|关闭自动签到|开启自动领丹|关闭自动领丹|开启自动挖矿|关闭自动挖矿|开启自动灵田|关闭自动灵田|开启自动宗门任务|关闭自动宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启自动修炼|关闭自动修炼|开启自动闭关|关闭自动闭关|开启自动宗门闭关|关闭自动宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启自动炼丹|开启自动背包炼丹|自动炼丹 .+|暂停自动炼丹|继续自动炼丹|关闭自动炼丹|自动炼丹状态|开启自动灵界升级|关闭自动灵界升级|自动灵界状态|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|灵界规划序列|开启自动无尽(?:\s+\d+)?|关闭自动无尽|自动无尽状态|无尽状态|开启无尽真元检测|关闭无尽真元检测|设置无尽真元检测.*|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|自动状态|任务状态|修仙状态|修仙菜单.*)$")
     async def on_self_command(self, event: AstrMessageEvent):
 
 
@@ -2207,6 +2275,14 @@ class XiaoXiuxianAuto(Star):
         elif text == "灵界刷新规划": reply = await self.linjie.cmd_refresh_plan(key, send_cb)
         elif text == "灵界规划详情": reply = await self.linjie.cmd_plan_detail(key, send_cb)
         elif text == "灵界规划序列": reply = await self.linjie.cmd_plan_sequence(key, send_cb)
+        elif text.startswith("开启自动无尽"):
+            reply = await self.endless.cmd_enable(key, text.replace("开启自动无尽", "", 1).strip(), send_cb)
+        elif text == "关闭自动无尽": reply = await self.endless.cmd_disable(key)
+        elif text in ("自动无尽状态", "无尽状态"): reply = await self.endless.cmd_status(key)
+        elif text == "开启无尽真元检测": reply = await self.endless.cmd_enable_mp_check(key)
+        elif text == "关闭无尽真元检测": reply = await self.endless.cmd_disable_mp_check(key)
+        elif text.startswith("设置无尽真元检测"):
+            reply = await self.endless.cmd_set_mp_threshold(key, text.replace("设置无尽真元检测", "", 1).strip())
         elif text.startswith("一键上架"):
             reply = await self.inventory_ops.cmd_start_market(key, text.replace("一键上架", "", 1).strip(), send_cb)
         elif text.startswith("一键炼金"):
@@ -2282,6 +2358,7 @@ class XiaoXiuxianAuto(Star):
             await self.sect.on_official_text(key, text, send_cb)
             await self.cultivate.on_official_text(key, text, send_cb)
             await self.linjie.on_official_text(key, text, send_cb)
+            await self.endless.on_official_text(key, text, send_cb)
 
         await self._handle_seclusion_guard_text(key, text)
 

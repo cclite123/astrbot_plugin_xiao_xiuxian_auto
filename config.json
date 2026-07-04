@@ -187,5 +187,24 @@
     "include_skill_breakthrough": false,
     "_comment_max_sim_steps": "多步滚动 ROI 模拟最大步数；默认15步，用于「灵界规划序列」和「灵界规划详情」。",
     "max_sim_steps": 15
+  },
+  "_comment_endless_tower": "自动无尽妖塔模块；支持限定挑战次数、真元检测和真元不足时宗门闭关恢复。",
+  "endless_tower": {
+    "_comment_enabled": "自动无尽妖塔总开关；false 时相关指令仅提示关闭。",
+    "enabled": true,
+    "_comment_mp_check_enabled": "默认是否开启真元检测；可通过指令 开启/关闭无尽真元检测 调整。",
+    "mp_check_enabled": true,
+    "_comment_mp_threshold": "真元检测阈值，范围 0-9999；低于该百分比时先宗门闭关恢复。",
+    "mp_threshold": 600,
+    "_comment_rest_duration_sec": "真元不足时宗门闭关持续秒数；7分钟10秒为 430。",
+    "rest_duration_sec": 430,
+    "_comment_action_delay_sec": "每次成功或状态切换后，间隔多少秒继续下一步。",
+    "action_delay_sec": 1.0,
+    "_comment_status_timeout_sec": "发送 我的状态 后等待回执的超时时间。",
+    "status_timeout_sec": 20.0,
+    "_comment_challenge_timeout_sec": "发送 挑战无尽妖塔 后等待回执的超时时间。",
+    "challenge_timeout_sec": 60.0,
+    "_comment_max_failures": "连续超时或解析失败多少次后自动停止。",
+    "max_failures": 3
   }
 }
