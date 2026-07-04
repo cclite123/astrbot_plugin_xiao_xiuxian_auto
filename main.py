@@ -251,6 +251,19 @@ def extract_raw_text(event) -> str:
     return text.strip()
 
 
+def _is_valid_qq_id(val) -> bool:
+    """判断一个值是否为有效的 QQ 号（纯数字字符串或整数），排除 callable/partial 等。"""
+    if val is None:
+        return False
+    if callable(val):
+        return False
+    try:
+        s = str(val).strip()
+        return bool(s) and s.isdigit()
+    except Exception:
+        return False
+
+
 def _get_platform_list(context) -> List[Any]:
     pm = getattr(context, "platform_manager", None)
     if pm is None: return []
@@ -1771,6 +1784,7 @@ class XiaoXiuxianAuto(Star):
 
         key = str(key)
         if self._is_key_send_blocked(key):
+            logger.info(f"[xiao_xiuxian_auto] [DIAG] 发送被阻止(已封禁): key={key}")
             return
         try:
             self_id, group_id = key.split(":", 1)
@@ -1781,7 +1795,9 @@ class XiaoXiuxianAuto(Star):
             logger.warning(f"[xiao_xiuxian_auto] 未找到 self_id={self_id} 的客户端，无法发送: {text}")
             return
         payload = self._build_message(text)
+        logger.info(f"[xiao_xiuxian_auto] [DIAG] 发送消息: key={key}, text='{text[:30]}', client_type={type(client).__name__}")
         result = await self._do_send(client, group_id, payload)
+        logger.info(f"[xiao_xiuxian_auto] [DIAG] 发送结果: {result}")
         if result is True:
             return
         if self.auto_block_permanent_send_error and self._is_permanent_send_error(result):
@@ -1825,8 +1841,10 @@ class XiaoXiuxianAuto(Star):
                             self._cached_bots[str(self_id)] = bot[str(self_id)]
                             return bot[str(self_id)]
                     else:
-                        sid = getattr(bot, "self_id", None) or getattr(bot, "qq", None)
-                        if sid is None or str(sid) == str(self_id):
+                        sid = getattr(bot, "self_id", None)
+                        if not _is_valid_qq_id(sid):
+                            sid = getattr(bot, "qq", None)
+                        if not _is_valid_qq_id(sid) or str(sid) == str(self_id):
                             self._cached_bots[str(self_id)] = bot
                             return bot
         except Exception: pass
@@ -1859,55 +1877,140 @@ class XiaoXiuxianAuto(Star):
                 if isinstance(raw_bot, dict):
                     bot_items = list(raw_bot.items())
                 else:
-                    sid = getattr(raw_bot, "self_id", None) or getattr(raw_bot, "qq", None)
-                    bot_items = [(str(sid or ""), raw_bot)]
+                    _raw_sid = getattr(raw_bot, "self_id", None)
+                    if not _is_valid_qq_id(_raw_sid):
+                        _raw_sid = getattr(raw_bot, "qq", None)
+                    if not _is_valid_qq_id(_raw_sid):
+                        _raw_sid = None
+                    bot_items = [(str(_raw_sid or ""), raw_bot)]
 
                 for sid_hint, bot in bot_items:
                     if not bot:
                         continue
                     self._any_bot = bot
-                    sid = getattr(bot, "self_id", None) or getattr(bot, "qq", None) or sid_hint
+                    _bot_sid = getattr(bot, "self_id", None)
+                    if not _is_valid_qq_id(_bot_sid):
+                        _bot_sid = getattr(bot, "qq", None)
+                    if not _is_valid_qq_id(_bot_sid):
+                        _bot_sid = None
+                    sid = _bot_sid or sid_hint or None
                     bot_key = str(sid or id(bot))
                     if bot_key in self._native_hooked_bot_ids:
                         continue
-                    if sid:
+                    if sid and _is_valid_qq_id(sid):
                         self._cached_bots[str(sid)] = bot
 
+                    _effective_sid_hint = str(sid) if _is_valid_qq_id(sid) else ""
+
                     @bot.on_message("group")
-                    async def _on_grp_msg(event, _plat=plat, _bot=bot, _sid_hint=str(sid or sid_hint or "")):
+                    async def _on_grp_msg(event, _plat=plat, _bot=bot, _sid_hint=_effective_sid_hint):
                         self._remember_bot(event, _bot, _sid_hint)
+                        # 当适配器拦截器活跃时，跳过原生钩子的处理（避免重复）
+                        if getattr(self, '_adapter_interceptor_active', False):
+                            return
                         _uid = event.get("user_id") if isinstance(event, dict) else getattr(event, "user_id", None)
                         _sid = event.get("self_id") if isinstance(event, dict) else getattr(event, "self_id", None)
-                        if _sid is None:
+                        if _sid is None or not _is_valid_qq_id(_sid):
                             _sid = _sid_hint
-                        if str(_uid) == str(_sid): return
-                        await self._handle_native_self(event, sid_hint=_sid_hint, bot=_bot)
-                        await self._handle_native_official(event, sid_hint=_sid_hint, bot=_bot)
+                        if str(_uid) == str(_sid):
+                            await self._handle_native_self(event, force_self=True, sid_hint=_sid_hint, bot=_bot)
+                        else:
+                            await self._handle_native_self(event, sid_hint=_sid_hint, bot=_bot)
+                            await self._handle_native_official(event, sid_hint=_sid_hint, bot=_bot)
                     hooked_official = True
 
                     @bot.on_message("private")
-                    async def _on_pri_msg(event, _plat=plat, _bot=bot, _sid_hint=str(sid or sid_hint or "")):
+                    async def _on_pri_msg(event, _plat=plat, _bot=bot, _sid_hint=_effective_sid_hint):
                         self._remember_bot(event, _bot, _sid_hint)
+                        if getattr(self, '_adapter_interceptor_active', False):
+                            return
                         _uid = event.get("user_id") if isinstance(event, dict) else getattr(event, "user_id", None)
                         _sid = event.get("self_id") if isinstance(event, dict) else getattr(event, "self_id", None)
-                        if _sid is None:
+                        if _sid is None or not _is_valid_qq_id(_sid):
                             _sid = _sid_hint
-                        if str(_uid) == str(_sid): return
-                        await self._handle_native_self(event, sid_hint=_sid_hint, bot=_bot)
-                        await self._handle_native_official(event, sid_hint=_sid_hint, bot=_bot)
+                        if str(_uid) == str(_sid):
+                            await self._handle_native_self(event, force_self=True, sid_hint=_sid_hint, bot=_bot)
+                        else:
+                            await self._handle_native_self(event, sid_hint=_sid_hint, bot=_bot)
+                            await self._handle_native_official(event, sid_hint=_sid_hint, bot=_bot)
                     hooked_official = True
 
+                    # ---- message_sent 挂载：多种方式尝试 ----
+                    async def _on_self_msg_impl(event, _bot=bot, _sid_hint=_effective_sid_hint):
+                        self._remember_bot(event, _bot, _sid_hint)
+                        await self._handle_native_self(event, force_self=True, sid_hint=_sid_hint, bot=_bot)
+
+                    # 方式 1: bot.on("message_sent") —— 标准 aiocqhttp
                     try:
-                        @bot.on("message_sent")
-                        async def _on_self_msg(event, _plat=plat, _bot=bot, _sid_hint=str(sid or sid_hint or "")):
-                            self._remember_bot(event, _bot, _sid_hint)
-                            await self._handle_native_self(event, force_self=True, sid_hint=_sid_hint, bot=_bot)
+                        bot.on("message_sent")(_on_self_msg_impl)
                         hooked_self = True
-                    except Exception: pass
+                    except Exception:
+                        pass
+                    # 方式 2: bot.on("message_sent.group") / bot.on("message_sent.private") —— 精确匹配
+                    for _evt_sub in ("message_sent.group", "message_sent.private"):
+                        try:
+                            bot.on(_evt_sub)(_on_self_msg_impl)
+                            hooked_self = True
+                        except Exception:
+                            pass
+
+                    # 方式 3: 深度挂钩 —— 直接向内部事件总线注册
+                    try:
+                        _bus = getattr(bot, "_bus", None) or getattr(bot, "bus", None)
+                        if _bus is not None:
+                            _subscribe = getattr(_bus, "subscribe", None) or getattr(_bus, "on", None)
+                            if callable(_subscribe):
+                                _subscribe("message_sent", _on_self_msg_impl)
+                                _subscribe("message_sent.group", _on_self_msg_impl)
+                                _subscribe("message_sent.private", _on_self_msg_impl)
+                                hooked_self = True
+                    except Exception:
+                        pass
+
+                    # 方式 4: 包装 _handle_event / handle_event 以确保 message_sent 触发
+                    if not hooked_self:
+                        for _he_name in ("_handle_event", "handle_event", "_handle_event_with_response"):
+                            _orig_he = getattr(bot, _he_name, None)
+                            if _orig_he is None or not callable(_orig_he):
+                                continue
+                            try:
+                                import functools
+
+                                @functools.wraps(_orig_he)
+                                async def _wrapped_he(event, _orig=_orig_he, _impl=_on_self_msg_impl):
+                                    result = await _orig(event)
+                                    _pt = event.get("post_type", "") if isinstance(event, dict) else getattr(event, "post_type", "")
+                                    if str(_pt) == "message_sent":
+                                        try:
+                                            await _impl(event)
+                                        except Exception as _e:
+                                            logger.debug(f"[xiao_xiuxian_auto] message_sent wrap handler error: {_e}")
+                                    return result
+
+                                setattr(bot, _he_name, _wrapped_he)
+                                hooked_self = True
+                                logger.info(f"[xiao_xiuxian_auto] 通过包装 {_he_name} 挂载 message_sent 钩子")
+                                break
+                            except Exception:
+                                continue
+
+                    # 方式 5: 向平台适配器注册 message_sent 处理器
+                    if not hooked_self:
+                        try:
+                            _plat_on = getattr(plat, "on", None) or getattr(plat, "on_event", None)
+                            if callable(_plat_on):
+                                _plat_on("message_sent")(_on_self_msg_impl)
+                                hooked_self = True
+                        except Exception:
+                            pass
 
                     self._native_hooked_bot_ids.add(bot_key)
                     hooked_any = True
-                    logger.info(f"[xiao_xiuxian_auto] 原生拦截器已生效 ({plat.__class__.__name__}, self_id={sid or 'unknown'})")
+                    logger.info(f"[xiao_xiuxian_auto] 原生拦截器已生效 ({plat.__class__.__name__}, self_id={sid or 'unknown'}, message_sent_hooked={hooked_self})")
+
+                    # ---- 方式 6: 探测并包装适配器事件处理 ----
+                    if not hooked_official or True:  # 始终尝试
+                        self._hook_adapter_event_pipe(plat, bot, _effective_sid_hint)
             if hooked_any:
                 self._native_hooked = True
                 self._native_self_hooked = hooked_self
@@ -1917,11 +2020,132 @@ class XiaoXiuxianAuto(Star):
             logger.exception(f"原生钩子挂载失败: {e}")
             return False
 
+    def _hook_adapter_event_pipe(self, plat, bot, sid_hint: str):
+        """探测 AstrBot aiocqhttp 适配器的事件处理管道，在适配器层面拦截所有消息事件。
+        解决 LLOneBot 事件不被 AstrBot 适配器转发给 CQHttp 对象和插件的问题。"""
+        import functools as _fw
+
+        _adapter = getattr(plat, "adapter", None) or getattr(plat, "_adapter", None) or plat
+        _hooked_any = False
+
+        # === 阶段 1: 完整属性探测 ===
+        for _obj_name, _obj in [("adapter", _adapter), ("plat", plat)]:
+            try:
+                _all_attrs = [a for a in dir(_obj) if not a.startswith("__")]
+                _callable_attrs = []
+                for _a in _all_attrs:
+                    _v = getattr(_obj, _a, None)
+                    if callable(_v) and not isinstance(_v, type):
+                        _callable_attrs.append(_a)
+                logger.info(f"[xiao_xiuxian_auto] [DIAG] {_obj_name} 可调用方法({len(_callable_attrs)}): {_callable_attrs[:30]}")
+            except Exception:
+                pass
+
+        # === 阶段 2: 包装所有事件相关方法 ===
+        _candidates = []
+        _keywords = ("handle_event", "on_event", "process_event", "dispatch_event",
+                      "event_callback", "_on_message", "handle_message",
+                      "on_message", "_process", "_dispatch",
+                      "_on_ws", "ws_receive", "_ws_handler",
+                      "handle_raw", "_handle_raw", "_raw_event",
+                      "_on_raw", "raw_event", "receive_event",
+                      "unified_webhook", "webhook_callback", "handle_msg",
+                      "_convert_handle_message_event", "_convert_handle_notice_event")
+        for _obj_name, _obj in [("adapter", _adapter), ("plat", plat), ("bot", bot)]:
+            for _attr in dir(_obj):
+                _lower = _attr.lower()
+                if any(kw in _lower for kw in _keywords):
+                    _fn = getattr(_obj, _attr, None)
+                    if callable(_fn) and not isinstance(_fn, type):
+                        _candidates.append((_obj_name, _attr, _obj, _fn))
+
+        if _candidates:
+            _names = [f"{n}.{a}" for n, a, _, _ in _candidates]
+            logger.info(f"[xiao_xiuxian_auto] [DIAG] 适配器事件方法探测: {_names}")
+
+        for _obj_name, _attr, _obj, _orig_fn in _candidates:
+            if getattr(_orig_fn, "_xx_hooked", False):
+                continue
+            try:
+                @_fw.wraps(_orig_fn)
+                async def _wrapped_event(*args, _orig=_orig_fn, _obj_n=_obj_name, _attr_n=_attr, _b=bot, _sh=sid_hint, **kwargs):
+                    # 先调用原始方法
+                    try:
+                        result = _orig(*args, **kwargs)
+                        if hasattr(result, "__await__"):
+                            result = await result
+                    except Exception as _orig_err:
+                        logger.debug(f"[xiao_xiuxian_auto] 原始方法 {_obj_n}.{_attr_n} 异常: {_orig_err}")
+                        result = None
+
+                    # 尝试从参数中提取事件数据
+                    try:
+                        _event_dict = None
+                        for _arg in args:
+                            if isinstance(_arg, dict) and "post_type" in _arg:
+                                _event_dict = _arg
+                                break
+                            if isinstance(_arg, str):
+                                try:
+                                    import json as _json
+                                    _parsed = _json.loads(_arg)
+                                    if isinstance(_parsed, dict) and "post_type" in _parsed:
+                                        _event_dict = _parsed
+                                        break
+                                except Exception:
+                                    pass
+                        if _event_dict is None and kwargs:
+                            for _v in kwargs.values():
+                                if isinstance(_v, dict) and "post_type" in _v:
+                                    _event_dict = _v
+                                    break
+
+                        if _event_dict is not None:
+                            _pt = str(_event_dict.get("post_type", ""))
+                            if _pt in ("message", "message_sent"):
+                                _uid = _event_dict.get("user_id", None)
+                                _txt = str(_event_dict.get("raw_message", ""))[:40]
+                                logger.info(f"[xiao_xiuxian_auto] [DIAG] 适配器事件拦截 [{_obj_n}.{_attr_n}]: post_type={_pt}, user={_uid}, text='{_txt}'")
+
+                                self._remember_bot(_event_dict, _b, _sh)
+                                _sid = _event_dict.get("self_id")
+                                if _sid is None or not _is_valid_qq_id(_sid):
+                                    _sid = _sh
+                                if _pt == "message_sent" or str(_uid) == str(_sid):
+                                    # 自发消息：始终 force_self
+                                    await self._handle_native_self(_event_dict, force_self=True, sid_hint=_sh, bot=_b)
+                                else:
+                                    await self._handle_native_self(_event_dict, sid_hint=_sh, bot=_b)
+                                    await self._handle_native_official(_event_dict, sid_hint=_sh, bot=_b)
+                        else:
+                            # 诊断：记录调用参数类型
+                            _arg_types = [type(a).__name__ for a in args]
+                            _kw_keys = list(kwargs.keys())
+                            logger.debug(f"[xiao_xixxian_auto] [DIAG] {_obj_n}.{_attr_n} 参数类型: args={_arg_types}, kwargs={_kw_keys}")
+                    except Exception as _hook_err:
+                        logger.debug(f"[xiao_xiuxian_auto] 适配器事件拦截异常: {_hook_err}")
+
+                    return result
+
+                setattr(_obj, _attr, _wrapped_event)
+                _wrapped_event._xx_hooked = True
+                _hooked_any = True
+                logger.info(f"[xiao_xiuxian_auto] 已包装适配器事件方法: {_obj_name}.{_attr}")
+            except Exception as _wrap_err:
+                logger.debug(f"[xiao_xiuxian_auto] 包装 {_obj_name}.{_attr} 失败: {_wrap_err}")
+
+        if _hooked_any:
+            self._adapter_interceptor_active = True
+            logger.info(f"[xiao_xiuxian_auto] 适配器拦截器已激活，原生钩子将跳过消息处理")
+        else:
+            logger.warning(f"[xiao_xiuxian_auto] [DIAG] 未找到可包装的适配器事件方法")
+
     def _remember_bot(self, event, bot, sid_hint: Optional[str] = None):
         sid = event.get("self_id") if isinstance(event, dict) else getattr(event, "self_id", None)
-        if sid is None or str(sid).strip() == "":
-            sid = getattr(bot, "self_id", None) or getattr(bot, "qq", None) or sid_hint
-        if sid is not None and str(sid).strip() != "":
+        if not _is_valid_qq_id(sid):
+            _bot_sid = getattr(bot, "self_id", None)
+            sid = _bot_sid if _is_valid_qq_id(_bot_sid) else (getattr(bot, "qq", None) if _is_valid_qq_id(getattr(bot, "qq", None)) else sid_hint)
+        if _is_valid_qq_id(sid):
             self._cached_bots[str(sid)] = bot
             self._any_bot = bot
 
@@ -1938,8 +2162,13 @@ class XiaoXiuxianAuto(Star):
                 return getattr(mo, k, default)
             return default
         sid = _g("self_id", "")
-        if sid is None or str(sid).strip() == "":
-            sid = getattr(bot, "self_id", None) or getattr(bot, "qq", None) or sid_hint or ""
+        if not _is_valid_qq_id(sid):
+            _bot_sid = getattr(bot, "self_id", None) if bot else None
+            if _is_valid_qq_id(_bot_sid):
+                sid = _bot_sid
+            else:
+                _bot_qq = getattr(bot, "qq", None) if bot else None
+                sid = _bot_qq if _is_valid_qq_id(_bot_qq) else (sid_hint or "")
         uid = _g("user_id", "")
         gid = _g("group_id", None)
         post_type = _g("post_type", "")
@@ -1963,12 +2192,16 @@ class XiaoXiuxianAuto(Star):
     async def _handle_native_self(self, event, force_self: bool = False, sid_hint: Optional[str] = None, bot=None):
         try:
             self_id, user_id, group_id, post_type = self._get_base_info(event, bot=bot, sid_hint=sid_hint)
+            # === 诊断 ===
+            logger.info(f"[xiao_xiuxian_auto] [DIAG] _handle_native_self: sid={self_id}, uid={user_id}, gid={group_id}, pt={post_type}, force={force_self}")
             if not ((user_id == self_id) or force_self or (post_type == "message_sent")): return
 
             text = extract_pure_text(event)
             if not text: return
             text = text.strip()
+            logger.info(f"[xiao_xiuxian_auto] [DIAG] _handle_native_self 处理指令: '{text}'")
             if self._is_recent_self_command_seen(self_id, group_id, text):
+                logger.info(f"[xiao_xiuxian_auto] [DIAG] 指令去重跳过: '{text}'")
                 return
             self._mark_self_command_seen(self_id, group_id, text)
 
@@ -2124,14 +2357,30 @@ class XiaoXiuxianAuto(Star):
         try:
             self_id, user_id, group_id, _ = self._get_base_info(event, bot=bot, sid_hint=sid_hint)
             official_qq = self._official_qq_for_self(self_id)
-            if str(user_id) != str(official_qq): return
-            if not await self._is_bound_match(self_id, group_id): return
+            logger.info(f"[xiao_xiuxian_auto] [DIAG] _handle_native_official: sid={self_id}, uid={user_id}, gid={group_id}, official_qq={official_qq}")
+            if str(user_id) != str(official_qq):
+                logger.info(f"[xiao_xiuxian_auto] [DIAG] _handle_native_official 跳过: uid({user_id}) != official_qq({official_qq})")
+                return
+            if not await self._is_bound_match(self_id, group_id):
+                logger.info(f"[xiao_xiuxian_auto] [DIAG] _handle_native_official 跳过: 群{group_id}未绑定")
+                return
 
             text = extract_pure_text(event)
             raw_text = extract_raw_text(event) or text
             if not text and not raw_text: return
 
             key = f"{self_id}:{group_id}"
+
+            # 去重：与 on_official_reply 共享同一个签名缓存，避免重复处理
+            _dedup_sig = f"{key}:{hash(text[:80])}:{int(time.time() // 2)}"
+            if getattr(self, '_recent_official_sigs', None) is None:
+                self._recent_official_sigs = {}
+            now = time.time()
+            self._recent_official_sigs = {k: v for k, v in self._recent_official_sigs.items() if now - v < 3.0}
+            if _dedup_sig in self._recent_official_sigs:
+                return
+            self._recent_official_sigs[_dedup_sig] = now
+
             self._known_keys.add(key)
             send_cb = self._make_send_cb(key)
 
@@ -2162,14 +2411,40 @@ class XiaoXiuxianAuto(Star):
 
 
     def _is_self(self, event: AstrMessageEvent) -> bool:
-        return str(event.get_sender_id()) == str(event.message_obj.self_id)
+        sender_id = str(event.get_sender_id())
+        self_id = getattr(event.message_obj, "self_id", None)
+        if not _is_valid_qq_id(self_id):
+            return False
+        return sender_id == str(self_id)
 
     def _is_official(self, event: AstrMessageEvent) -> bool:
-        sid = str(getattr(event.message_obj, "self_id", ""))
-        return str(event.get_sender_id()) == str(self._official_qq_for_self(sid))
+        self_id = getattr(event.message_obj, "self_id", None)
+        sid = str(self_id) if _is_valid_qq_id(self_id) else ""
+        sender = str(event.get_sender_id())
+        # 直接用默认 official_qq 判断（兼容 self_id 无法获取的情况）
+        if sender == str(self.default_official_qq):
+            return True
+        return sender == str(self._official_qq_for_self(sid))
 
     def _key_of_astr_event(self, event: AstrMessageEvent) -> str:
-        sid = str(event.message_obj.self_id)
+        self_id = getattr(event.message_obj, "self_id", None)
+        sid = str(self_id) if _is_valid_qq_id(self_id) else ""
+        # 如果 self_id 无效，尝试从已知绑定中通过 group_id 推断
+        if not sid:
+            gid = getattr(event.message_obj, "group_id", None)
+            if gid:
+                for cached_sid in self._cached_bots:
+                    if f"{cached_sid}:{gid}" in self._known_keys:
+                        sid = cached_sid
+                        break
+                if not sid:
+                    # 从配置绑定中查找
+                    for cfg_sid, cfg_groups in self._configured_bound_dict().items():
+                        if str(gid) in cfg_groups:
+                            sid = cfg_sid
+                            break
+        if not sid:
+            sid = "unknown"
         gid = getattr(event.message_obj, "group_id", None)
         return f"{sid}:{gid}" if gid else f"{sid}:private:{event.get_sender_id()}"
 
@@ -2183,7 +2458,8 @@ class XiaoXiuxianAuto(Star):
         if not text: return
         text = text.strip()
 
-        self_id = str(event.message_obj.self_id)
+        _raw_self_id = getattr(event.message_obj, "self_id", None)
+        self_id = str(_raw_self_id) if _is_valid_qq_id(_raw_self_id) else str(event.get_sender_id())
         group_id = getattr(event.message_obj, "group_id", None)
         if group_id is not None: group_id = str(group_id)
         if self._is_recent_self_command_seen(self_id, group_id, text):
@@ -2331,19 +2607,71 @@ class XiaoXiuxianAuto(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_official_reply(self, event: AstrMessageEvent):
-        if getattr(self, "_native_official_hooked", False): return
+        # 当适配器拦截器活跃时，官方消息已由拦截器处理，跳过以避免重复
+        if getattr(self, '_adapter_interceptor_active', False):
+            return
+        # === 诊断日志 ===
+        try:
+            _sender_id = str(event.get_sender_id()) if event.get_sender_id() else "?"
+            _msg_obj = event.message_obj if event.message_obj else None
+            _self_id_raw = getattr(_msg_obj, "self_id", None)
+            _self_id_valid = _is_valid_qq_id(_self_id_raw)
+            _gid = getattr(_msg_obj, "group_id", None)
+            _text_preview = extract_pure_text(event)[:50] if event else ""
+            _is_official = _sender_id == str(self.default_official_qq)
+            if _is_official or not _self_id_valid:
+                logger.info(
+                    f"[xiao_xiuxian_auto] [DIAG] on_official_reply 被触发: "
+                    f"sender={_sender_id}, self_id={_self_id_raw}(valid={_self_id_valid}), "
+                    f"group={_gid}, text='{_text_preview}'"
+                )
+        except Exception as _diag_err:
+            logger.warning(f"[xiao_xiuxian_auto] [DIAG] 日志异常: {_diag_err}")
+        # === 诊断日志结束 ===
+
+        # 不再因 _native_official_hooked 跳过：LLOneBot 等适配器可能不转发事件到原生钩子
+        # 去重由 _is_recent_official_msg_seen 保证不会重复处理
         if not self._is_official(event): return
         text = extract_pure_text(event)
         raw_text = extract_raw_text(event) or text
         if not text and not raw_text: return
 
-        self_id = str(event.message_obj.self_id)
+        _raw_self_id = getattr(event.message_obj, "self_id", None)
+        self_id = str(_raw_self_id) if _is_valid_qq_id(_raw_self_id) else ""
         group_id = getattr(event.message_obj, "group_id", None)
         if group_id is not None: group_id = str(group_id)
+
+        # 如果 self_id 无效，通过 group_id 从绑定配置/缓存中推断
+        if not self_id and group_id:
+            for cached_sid in self._cached_bots:
+                if f"{cached_sid}:{group_id}" in self._known_keys:
+                    self_id = cached_sid
+                    break
+            if not self_id:
+                for cfg_sid, cfg_groups in self._configured_bound_dict().items():
+                    if str(group_id) in cfg_groups:
+                        self_id = cfg_sid
+                        break
+        if not self_id:
+            # 最后尝试：如果只有一个绑定账号，直接使用
+            all_configured = self._configured_bound_dict()
+            if len(all_configured) == 1:
+                self_id = list(all_configured.keys())[0]
 
         if not await self._is_bound_match(self_id, group_id): return
 
         key = self._key_of_astr_event(event)
+        # 去重：避免原生钩子和 AstrBot 事件层同时处理
+        _dedup_sig = f"{key}:{hash(text[:80])}:{int(time.time() // 2)}"
+        if getattr(self, '_recent_official_sigs', None) is None:
+            self._recent_official_sigs = {}
+        now = time.time()
+        # 清理过期
+        self._recent_official_sigs = {k: v for k, v in self._recent_official_sigs.items() if now - v < 3.0}
+        if _dedup_sig in self._recent_official_sigs:
+            return
+        self._recent_official_sigs[_dedup_sig] = now
+
         self._known_keys.add(key)
         send_cb = self._make_send_cb(key)
 
