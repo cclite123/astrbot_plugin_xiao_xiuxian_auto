@@ -1092,8 +1092,6 @@ class LinjieUpgradeController:
 
         return [c for c in candidates if c.cost > 0 and c.gain > 0]
 
-    # ── 多步 ROI 滚动模拟 ──────────────────────────────────────────
-
     def _simulate_multi_step_plan(self, st: LinjieState) -> List[Dict[str, Any]]:
         """多步滚动 ROI 贪心模拟，与 Excel 保持一致。
         每一步：从当前模拟态生成全部候选 → 选 ROI 最优 → 应用状态变更 → 进入下一步。
@@ -1121,10 +1119,8 @@ class LinjieUpgradeController:
             )
             if not candidates:
                 break
-            # 与 Excel 一致：在所有候选中选 ROI 最优，不管当前余额是否足够
             best = min(candidates, key=lambda c: c.roi_days)
             step_data = self._candidate_to_dict(best)
-            # 记录是否可负担及等待时间
             if sim_state["balance"] >= best.cost:
                 step_data["affordable"] = True
                 step_data["wait_sec"] = 0.0
@@ -1134,7 +1130,6 @@ class LinjieUpgradeController:
                 step_data["wait_sec"] = (best.cost - sim_state["balance"]) / speed
             steps.append(step_data)
             self._sim_apply_step(sim_buildings, sim_state, best)
-            # Excel 逻辑：可负担时扣除成本，不可负担时余额清零
             if sim_state["balance"] >= best.cost:
                 sim_state["balance"] -= best.cost
             else:
@@ -1162,7 +1157,6 @@ class LinjieUpgradeController:
             workers = int(item.get("workers", 0))
             cap = CAP_PER_BUILDING.get(name, 0) * count
 
-            # 建筑+1
             build_cost = BASE_BUILD_COST.get(name, 0.0) * (1.25 ** count)
             build_gain = BASE_OUTPUT.get(name, 0.0) * (tech + 1) * abundance_factor * monthly_factor
             if build_cost > 0 and build_gain > 0 and not item.get("build_locked"):
@@ -1171,7 +1165,6 @@ class LinjieUpgradeController:
                     f"灵界建造{name} 1", f"{name}+1座",
                 ))
 
-            # 杂役+1
             worker_cost = BASE_WORKER_COST.get(name, 0.0) * (1.1 ** workers)
             worker_gain = (
                 BASE_WORKER_OUTPUT.get(name, 0.0)

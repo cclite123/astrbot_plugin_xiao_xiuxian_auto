@@ -60,7 +60,7 @@ class Recipe:
 class AutoAlchemyJob:
     phase: str = "IDLE"
     report_mode: str = "calculate"
-    mode: str = "batch"  # batch / target / backpack
+    mode: str = "batch"
     current_page: int = 1
     max_page: int = 8
     scan_pages: List[int] = field(default_factory=list)
@@ -78,8 +78,8 @@ class AutoAlchemyJob:
     last_command_ts: float = 0.0
 
 
-    target_pill: str = ""          # 指定丹药模式丹药名
-    target_rounds: int = 1          # 指定丹药模式炉数
+    target_pill: str = ""
+    target_rounds: int = 1
     yield_count: int = 6
     min_profit: float = 100.0
 
@@ -138,7 +138,6 @@ class AutoAlchemyJob:
     backpack_pages_seen: List[int] = field(default_factory=list)
     backpack_total_pages: int = 1
 
-    # 自动购买药材相关字段
     herb_buy_rounds: int = 1
     herb_buy_current_round: int = 0
     herb_buy_scan_index: int = 0
@@ -152,7 +151,6 @@ class AutoAlchemyJob:
     herb_buy_page_items: List[Dict[str, Any]] = field(default_factory=list)
     herb_buy_page_item_index: int = 0
 
-    # 坊市扫描动态购买相关字段
     dynamic_buy_queue: List[Dict[str, Any]] = field(default_factory=list)
     dynamic_buy_index: int = 0
     dynamic_buy_current_item: Dict[str, Any] = field(default_factory=dict)
@@ -255,7 +253,6 @@ class AutoAlchemyOptimizer:
         self.jobs: Dict[str, AutoAlchemyJob] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
 
-        # 自动购买药材最高价配置
         self.herb_max_prices_path = str(cfg.get("herb_max_prices_path", "") or "")
         if not self.herb_max_prices_path and self.snapshot_path:
             self.herb_max_prices_path = os.path.join(os.path.dirname(self.snapshot_path), "herb_max_prices.yaml")
@@ -589,7 +586,6 @@ class AutoAlchemyOptimizer:
             await self._send_next_alchemy_command(key, job, send_cb)
             return f"▶️ 自动炼丹继续执行。\n暂停原因：{reason}\n正在继续发送当前炼丹配方。"
         if prev == "COLLECTING_DYN_BUY_WAIT":
-            # 恢复时跳过当前动态购买，继续采集
             job.dynamic_buy_fail += 1
             job.dynamic_buy_current_item = {}
             job.dynamic_buy_index += 1
@@ -1258,7 +1254,6 @@ class AutoAlchemyOptimizer:
             round_candidates.sort(key=lambda pair: pair[0], reverse=True)
             best = round_candidates[0][1]
             selected.append(best)
-            # 扣减背包已用材料
             for m in best.get("materials", []):
                 n = self.normalize_name(m.get("name", ""))
                 use_bag = int(m.get("backpack_used") or 0)
@@ -1306,7 +1301,6 @@ class AutoAlchemyOptimizer:
         if not self._looks_like_market_text(clean_text):
             return False
         self._merge_market_page(job, raw_text, int(job.current_page))
-        # 动态购买：检查当前页是否有符合最高价的药材
         if self.dynamic_herb_buy_during_scan and self.herb_max_prices:
             page_items = self.parse_market_items(raw_text)
             dyn_queue = self._collect_dynamic_buy_items(page_items, int(job.current_page))
@@ -1319,7 +1313,6 @@ class AutoAlchemyOptimizer:
                     await asyncio.sleep(self.send_interval_sec)
                 await self._send_next_dynamic_buy(key, job, send_cb)
                 return True
-        # 继续下一页或完成采集
         await self._advance_collecting_or_finish(key, job, send_cb)
         return True
 
@@ -1333,14 +1326,12 @@ class AutoAlchemyOptimizer:
                 await asyncio.sleep(self.send_interval_sec)
             await self._send_page(job, send_cb)
             return
-        # 所有坊市页采集完成，转入背包药材获取
         if job.report_mode == "backpack_buy":
             await self._finish_backpack_collecting_and_start_buy(key, job, send_cb)
             return
         if job.report_mode == "target_buy":
             await self._finish_collecting_and_start_target_buy(key, job, send_cb)
             return
-        # 批量模式：坊市扫描完成后获取背包药材
         await send_cb(
             f"📊 坊市价格采集完成：已获取 {len(job.prices)} 种药材价格。\n"
             "📦 正在读取药材背包用于智能抵扣。"
@@ -1381,7 +1372,6 @@ class AutoAlchemyOptimizer:
             job.last_command_ts = job.updated_at = time.time()
             await send_cb(buy_cmd)
             return
-        # 当前页动态购买完成，继续采集流程
         await self._advance_collecting_or_finish(key, job, send_cb)
 
     async def _handle_collecting_dyn_buy_result(self, key: str, job: AutoAlchemyJob, raw_text: str, clean_text: str, send_cb) -> bool:
@@ -1390,7 +1380,6 @@ class AutoAlchemyOptimizer:
         name = self.normalize_name(item.get("name", ""))
         if self._is_official_busy(clean_text):
             if job.dynamic_busy_retry_done:
-                # 已重试过仍然繁忙，放弃当前药材
                 await send_cb(f"⏳ {name} 繁忙重试后仍繁忙，已跳过。")
                 job.dynamic_buy_fail += 1
                 job.dynamic_buy_current_item = {}
@@ -1401,7 +1390,6 @@ class AutoAlchemyOptimizer:
                     await asyncio.sleep(self.send_interval_sec)
                 await self._send_next_dynamic_buy(key, job, send_cb)
                 return True
-            # 第一次繁忙：等待 3 秒后重试
             job.dynamic_busy_retry_done = True
             await send_cb(f"⏳ 小小繁忙，3秒后重试：{name}")
             await asyncio.sleep(3.0)
@@ -1410,7 +1398,6 @@ class AutoAlchemyOptimizer:
                 job.last_command_ts = job.updated_at = time.time()
                 await send_cb(buy_cmd)
                 return True
-            # 缺少购买指令，跳过
             job.dynamic_buy_fail += 1
             job.dynamic_buy_current_item = {}
             job.dynamic_buy_index += 1
