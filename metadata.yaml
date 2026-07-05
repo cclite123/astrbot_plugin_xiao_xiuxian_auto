@@ -4,6 +4,6 @@ author: cclite123
 desc: 小小修仙全自动挂机插件 —— 悬赏、秘境、宗门、炼丹、签到、挖矿、灵田、闭关修炼，一键解放双手。
 short_desc: QQ修仙游戏全自动挂机插件
 version: "1.0.0"
-repo: https://github.com/cclite123/xiaoxiuxian
+repo: https://github.com/cclite123/astrbot_plugin_xiao_xiuxian_auto
 support_platforms:
   - aiocqhttp
