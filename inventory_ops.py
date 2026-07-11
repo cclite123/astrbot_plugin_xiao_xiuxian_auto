@@ -58,7 +58,7 @@ class InventoryOpsController:
 
     RE_PAGE = re.compile(r"第\s*(?P<cur>\d+)\s*页\s*/\s*共\s*(?P<total>\d+)\s*页")
     RE_NAME = re.compile(r"(?:名字|名称)\s*[:：]\s*(?P<name>[^\n\r\[\]（）()]+)")
-    RE_COUNT = re.compile(r"拥有数量\s*[:：]?\s*(?P<count>\d+)")
+    RE_COUNT = re.compile(r"(?:拥有)?数量\s*[:：]?\s*(?P<count>\d+)")
 
     SUCCESS_MARKET = "物品成功上架坊市"
     SUCCESS_ALCHEMY = "炼金成功"
@@ -345,7 +345,7 @@ class InventoryOpsController:
 
     async def _handle_collecting(self, key: str, job: InventoryJob, text: str, send_cb) -> bool:
 
-        if not ("拥有数量" in text or "名字" in text or "第" in text and "共" in text and "页" in text):
+        if not ("拥有数量" in text or "数量" in text or "名字" in text or "☆" in text or "第" in text and "共" in text and "页" in text):
             return False
 
         cur, total = self._parse_page_info(text, job.current_page)
@@ -759,6 +759,8 @@ class InventoryOpsController:
 
                 if not name:
                     name = self._extract_name_from_display_line(pending_line, section_hint=section, target_category=target_category)
+                if not name:
+                    name = self._extract_name_from_display_line(line, section_hint=section, target_category=target_category)
 
                 add_item(name, count, block, section)
                 pending_line = ""
@@ -828,6 +830,11 @@ class InventoryOpsController:
 
         if section_hint == CATEGORY_ARTIFACT or target_category == CATEGORY_ARTIFACT:
             s = re.sub(
+                r"^(?:人阶|黄阶|玄阶|地阶|天阶|仙阶)(?:下品|中品|上品|极品)?",
+                "",
+                s,
+            )
+            s = re.sub(
                 r"(?:人阶|黄阶|玄阶|地阶|天阶|仙阶)(?:下品|中品|上品|极品)?(?:辅修功法|功法|神通|心法|术法|秘术|法门)$",
                 "",
                 s,
@@ -851,7 +858,7 @@ class InventoryOpsController:
         if not s:
             return False
         banned = (
-            "背包", "持有灵石", "物品功效", "炼金", "坊市数据", "拥有数量", "上一页", "下一页",
+            "背包", "持有灵石", "物品功效", "炼金", "坊市数据", "拥有数量", "查看效果", "上一页", "下一页",
             "第", "名字", "名称", "品级", "core.event_bus", "小小/", "锻造背包",
         )
         if any(x in s for x in banned):
@@ -872,6 +879,8 @@ class InventoryOpsController:
         name = re.sub(r"坊市数据.*$", "", name)
         name = re.sub(r"物品功效.*$", "", name)
         name = re.sub(r"^名字[:：]", "", name)
+        name = re.sub(r"[（(]\s*已\s*[装穿]备\s*[)）].*$", "", name)
+        name = re.sub(r"[-－]*\s*数量\s*[:：]?\s*\d+.*$", "", name)
         name = name.strip("[]【】()（）:：| ")
         return name
 
@@ -890,6 +899,8 @@ class InventoryOpsController:
                 return CATEGORY_ARTIFACT
             if any(x in s for x in ("道具背包", "道具列表", "【道具】", "道具：", "道具")):
                 return CATEGORY_PROP
+            if any(x in s for x in ("功法背包", "功法列表", "【功法】", "功法：", "功法")):
+                return CATEGORY_ARTIFACT
         return ""
 
     def _classify_item(self, block: str, *, section_hint: str, target_category: str) -> str:

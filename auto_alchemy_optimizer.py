@@ -959,7 +959,7 @@ class AutoAlchemyOptimizer:
             await send_cb("❌ 自动背包炼丹失败：背包解析器不可用。")
             return True
         inv_text = self.inventory_parser._cleanup_text(raw_text)
-        if not ("拥有数量" in inv_text or "名字" in inv_text or ("第" in inv_text and "共" in inv_text and "页" in inv_text)):
+        if not ("拥有数量" in inv_text or "数量" in inv_text or "名字" in inv_text or "☆" in inv_text or ("第" in inv_text and "共" in inv_text and "页" in inv_text)):
             return False
         cur, total = self.inventory_parser._parse_page_info(inv_text, int(job.current_page or 1))
         job.current_page = max(1, int(cur or job.current_page or 1))
