@@ -12,6 +12,15 @@ from astrbot.api.star import Star, register
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api import logger
 
+try:
+    from astrbot.api.web import request, json_response, error_response
+    _WEB_API_AVAILABLE = True
+except Exception:
+    _WEB_API_AVAILABLE = False
+    request = None
+    json_response = None
+    error_response = None
+
 _plugin_dir = os.path.dirname(os.path.abspath(__file__))
 if _plugin_dir not in sys.path:
     sys.path.insert(0, _plugin_dir)
@@ -43,6 +52,7 @@ except ImportError:
     from linjie import LinjieUpgradeController, format_money as format_linjie_money
     from endless import EndlessTowerController
 
+PLUGIN_NAME = "astrbot_plugin_xiao_xiuxian_auto"
 OFFICIAL_BOT_QQ_DEFAULT = "3889001741"
 BIND_KEY = "__bound__"
 SEND_BLOCKED_KEY = "__send_blocked__"
@@ -348,6 +358,37 @@ def _load_local_config() -> Dict[str, Any]:
         return {}
 
 
+def _page_override_path() -> str:
+    return os.path.join(_plugin_dir, "data", "page_config_override.json")
+
+
+def _load_page_override() -> Dict[str, Any]:
+    path = _page_override_path()
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning(f"[xiao_xiuxian_auto] 读取 Page 覆盖配置失败：{e}")
+        return {}
+
+
+def _save_page_override(data: Dict[str, Any]) -> None:
+    path = _page_override_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.warning(f"[xiao_xiuxian_auto] 保存 Page 覆盖配置失败：{e}")
+        raise
+
+
 @register(
     "astrbot_plugin_xiao_xiuxian_auto",
     "cclite123",
@@ -359,28 +400,45 @@ class XiaoXiuxianAuto(Star):
     def __init__(self, context, config: dict | None = None):
         super().__init__(context)
         _ensure_local_config_defaults()
-        self.cfg = _deep_merge_dict(_load_local_config(), config or {})
+        self.context = context
+        self._astrbot_config = config or {}
         self.data_dir = os.path.join(_plugin_dir, "data")
         os.makedirs(self.data_dir, exist_ok=True)
-
         self.store = JsonStore(os.path.join(self.data_dir, "bounty_state.json"))
+        self._reload_lock = asyncio.Lock()
+        self._page_api_enabled = False
+        self._tick_task: Optional[asyncio.Task] = None
+        self._known_keys: set[str] = set()
+        self._native_hooked = False
+        self._native_self_hooked = False
+        self._native_official_hooked = False
+        self._cached_bots: Dict[str, Any] = {}
+        self._any_bot: Any = None
+        self._native_hooked_bot_ids: set[str] = set()
+        self._recent_self_commands: Dict[str, float] = {}
+        self._last_native_hook_ts: float = 0.0
+        self._send_queues: Dict[str, List[str]] = {}
+        self._send_locks: Dict[str, asyncio.Lock] = {}
+        self._send_tasks: Dict[str, asyncio.Task] = {}
+        self._activity_owner: Dict[str, str] = {}
+        self._send_blocked_keys: Dict[str, str] = {}
+        self._last_official_command: Dict[str, str] = {}
+        self._seclusion_pending_commands: Dict[str, List[str]] = {}
+        self._seclusion_exit_attempts: Dict[str, int] = {}
+        self._seclusion_exit_mode: Dict[str, str] = {}
+        self._init_controllers()
+        self._register_page_api()
 
-
-
-
+    def _init_controllers(self) -> None:
+        # 配置合并优先级：config.json < AstrBot 注入配置 < Page 覆盖配置
+        self.cfg = _deep_merge_dict(_load_local_config(), self._astrbot_config or {})
+        self.cfg = _deep_merge_dict(self.cfg, _load_page_override())
 
         self.multi_cfg = dict(self.cfg.get("multi_account", {}) or {})
         self.multi_account_enabled = bool(self.multi_cfg.get("enabled", True))
         self.allow_multi_groups_per_account = bool(self.multi_cfg.get("allow_multi_groups_per_account", True))
         self.default_official_qq = str(self.cfg.get("official_bot_qq", OFFICIAL_BOT_QQ_DEFAULT))
         official_qq = self.default_official_qq
-
-
-
-
-
-
-
 
         self.market_price_config_path = os.path.join(self.data_dir, "market_price_runtime_config.json")
         file_mcfg = dict(self.cfg.get("market_price", {}) or {})
@@ -438,7 +496,6 @@ class XiaoXiuxianAuto(Star):
         self.routine = RoutineController(store=self.store, official_qq=official_qq, logger=logger)
         self.sect = SectController(store=self.store, official_qq=official_qq, logger=logger)
         self.cultivate = CultivateController(store=self.store, official_qq=official_qq, logger=logger)
-
         self.sect.bind_cultivate(self.cultivate)
 
         inv_cfg = dict(self.cfg.get("inventory_ops", {}) or {})
@@ -480,29 +537,8 @@ class XiaoXiuxianAuto(Star):
             self.auto_alchemy.refresh_pages_each_buy_round,
         )
 
-        self._tick_task: Optional[asyncio.Task] = None
-        self._known_keys: set[str] = set()
-        self._native_hooked = False
-        self._native_self_hooked = False
-        self._native_official_hooked = False
-        self._cached_bots: Dict[str, Any] = {}
-        self._any_bot: Any = None
-
-
-        self._native_hooked_bot_ids: set[str] = set()
-
-        self._recent_self_commands: Dict[str, float] = {}
-        self._last_native_hook_ts: float = 0.0
-
-
-
-
-
         coord_cfg = self.cfg.get("coordinator", {})
         self.command_delay_sec = max(0.0, float(coord_cfg.get("command_delay_sec", 2.0)))
-
-
-
         name_to_module = {
             "悬赏": ACTIVITY_MODULE_BOUNTY,
             "秘境": ACTIVITY_MODULE_SECRET,
@@ -519,31 +555,155 @@ class XiaoXiuxianAuto(Star):
             if module:
                 self._activity_priority[module] = (idx + 1) * 10
 
-        self._send_queues: Dict[str, List[str]] = {}
-        self._send_locks: Dict[str, asyncio.Lock] = {}
-        self._send_tasks: Dict[str, asyncio.Task] = {}
-        self._activity_owner: Dict[str, str] = {}
-
-
-
-
         fail_cfg = self.cfg.get("send_fail_policy", {}) or {}
         self.auto_block_permanent_send_error = bool(fail_cfg.get("auto_block_permanent_send_error", True))
         self.auto_unbind_on_permanent_send_error = bool(fail_cfg.get("auto_unbind_on_permanent_send_error", True))
-        self._send_blocked_keys: Dict[str, str] = {}
-
-
-
 
         sg_cfg = self.cfg.get("seclusion_guard", {}) or {}
         self.seclusion_guard_enabled = bool(sg_cfg.get("enabled", True))
         self.seclusion_guard_retry_delay_sec = max(0.0, float(sg_cfg.get("retry_delay_sec", 1.5)))
         self.seclusion_guard_max_attempts = max(1, int(sg_cfg.get("max_exit_attempts", 2)))
         self.seclusion_guard_prefer_sect_exit = bool(sg_cfg.get("prefer_sect_exit", True))
-        self._last_official_command: Dict[str, str] = {}
-        self._seclusion_pending_commands: Dict[str, List[str]] = {}
-        self._seclusion_exit_attempts: Dict[str, int] = {}
-        self._seclusion_exit_mode: Dict[str, str] = {}
+
+    async def reload_config(self) -> None:
+        async with self._reload_lock:
+            logger.info("[xiao_xiuxian_auto] 开始热重载配置...")
+            if self._tick_task:
+                self._tick_task.cancel()
+                try:
+                    await self._tick_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                self._tick_task = None
+            for task in list(self._send_tasks.values()):
+                task.cancel()
+            for task in list(self._send_tasks.values()):
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            self._send_tasks.clear()
+            self._init_controllers()
+            try:
+                await self.market_price.refresh(force=True)
+            except Exception as e:
+                logger.warning(f"[xiao_xiuxian_auto] 重载后刷新坊市价格失败：{e}")
+            self._tick_task = asyncio.create_task(self._tick_loop())
+            logger.info("[xiao_xiuxian_auto] 配置热重载完成")
+
+    def _register_page_api(self) -> None:
+        if not _WEB_API_AVAILABLE or not hasattr(self.context, "register_web_api"):
+            self._page_api_enabled = False
+            return
+        try:
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/config", self._page_get_config, ["GET"], "获取小小修仙插件配置"
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/config/save", self._page_save_config, ["POST"], "保存小小修仙插件配置"
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/status", self._page_get_status, ["GET"], "小小修仙运行状态"
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/alchemy_rules", self._page_get_alchemy_rules, ["GET"], "炼金白黑名单"
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/alchemy_rules/save", self._page_save_alchemy_rules, ["POST"], "保存炼金白黑名单"
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/herb_prices", self._page_get_herb_prices, ["GET"], "药材上限价"
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/herb_prices/save", self._page_save_herb_prices, ["POST"], "保存药材上限价"
+            )
+            self._page_api_enabled = True
+            logger.info("[xiao_xiuxian_auto] 插件 Page API 已注册")
+        except Exception as e:
+            self._page_api_enabled = False
+            logger.warning(f"[xiao_xiuxian_auto] 注册 Page API 失败：{e}")
+
+    async def _page_get_config(self):
+        schema = {}
+        schema_path = os.path.join(_plugin_dir, "_conf_schema.json")
+        try:
+            if os.path.exists(schema_path):
+                with open(schema_path, "r", encoding="utf-8") as f:
+                    schema = json.load(f)
+        except Exception as e:
+            logger.warning(f"[xiao_xiuxian_auto] 读取 _conf_schema.json 失败：{e}")
+        return json_response({"config": self.cfg, "schema": schema})
+
+    async def _page_save_config(self):
+        if request is None:
+            return error_response("web API 不可用", status_code=500)
+        payload = await request.json(default={})
+        new_config = payload.get("config") if isinstance(payload, dict) else None
+        if not isinstance(new_config, dict):
+            return error_response("config 必须是对象", status_code=400)
+        try:
+            _save_page_override(new_config)
+        except Exception:
+            return error_response("保存配置失败", status_code=500)
+        reloaded = False
+        try:
+            await self.reload_config()
+            reloaded = True
+        except Exception as e:
+            logger.warning(f"[xiao_xiuxian_auto] 配置热重载失败：{e}")
+        return json_response({"ok": True, "reloaded": reloaded})
+
+    async def _page_get_status(self):
+        return json_response({
+            "initialized": True,
+            "page_api_enabled": getattr(self, "_page_api_enabled", False),
+            "bound_keys": len(self._known_keys),
+            "test_mode": bool(self.cfg.get("test_mode", False)),
+            "multi_account_enabled": self.multi_account_enabled,
+            "market_price_enabled": self.market_price.enabled,
+        })
+
+    async def _page_get_alchemy_rules(self):
+        inv = self.inventory_ops
+        return json_response({
+            "whitelist_pill": sorted(inv.alchemy_whitelist.get("丹药", set())),
+            "blacklist_equip": sorted(inv.alchemy_blacklist.get("装备", set())),
+            "blacklist_artifact": sorted(inv.alchemy_blacklist.get("神物", set())),
+        })
+
+    async def _page_save_alchemy_rules(self):
+        if request is None:
+            return error_response("web API 不可用", status_code=500)
+        payload = await request.json(default={})
+        try:
+            self.inventory_ops.set_alchemy_rules(
+                payload.get("whitelist_pill") or [],
+                payload.get("blacklist_equip") or [],
+                payload.get("blacklist_artifact") or [],
+            )
+        except Exception as e:
+            return error_response(f"保存名单失败：{e}", status_code=500)
+        return json_response({"ok": True})
+
+    async def _page_get_herb_prices(self):
+        return json_response({"prices": dict(self.auto_alchemy.herb_max_prices or {})})
+
+    async def _page_save_herb_prices(self):
+        if request is None:
+            return error_response("web API 不可用", status_code=500)
+        payload = await request.json(default={})
+        prices = payload.get("prices") if isinstance(payload, dict) else None
+        if not isinstance(prices, dict):
+            return error_response("prices 必须是对象", status_code=400)
+        try:
+            self.auto_alchemy.set_herb_max_prices(prices)
+        except Exception as e:
+            return error_response(f"保存药材价格失败：{e}", status_code=500)
+        return json_response({"ok": True})
 
     async def initialize(self):
         self.store.start()

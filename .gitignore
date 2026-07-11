@@ -13,6 +13,7 @@ env/
 .vscode/
 .idea/
 .qoder/
+.claude/
 *.swp
 *.swo
 
@@ -28,6 +29,7 @@ deploy-config.json
 # Runtime cache (data 目录下的缓存文件)
 data/*_cache*.json
 data/*_runtime_config.json
+data/page_config_override.json
 
 # Logs
 *.log

@@ -311,6 +311,19 @@ class AutoAlchemyOptimizer:
         except Exception as e:
             self._warn(f"保存药材最高价配置失败：{e}")
 
+    def set_herb_max_prices(self, prices: Dict[str, float]) -> None:
+        """整体设置药材上限价并持久化（供 WebUI Page 调用）。"""
+        cleaned: Dict[str, float] = {}
+        for name, price in (prices or {}).items():
+            try:
+                p = float(price)
+            except Exception:
+                continue
+            if p > 0:
+                cleaned[self.normalize_name(str(name))] = p
+        self.herb_max_prices = cleaned
+        self._save_herb_max_prices(cleaned)
+
     @classmethod
     def normalize_name(cls, name: str) -> str:
         name = str(name or "").strip()

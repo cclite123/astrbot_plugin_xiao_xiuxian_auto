@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>小小修仙配置中心</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1><span class="logo">☯</span>小小修仙 · 配置中心</h1>
+      <div class="actions">
+        <input id="search" type="search" placeholder="搜索配置项…" />
+        <button id="save-btn" class="primary">保存并热重载</button>
+      </div>
+      <div id="status-line" class="status-line"></div>
+    </header>
+    <main class="body">
+      <nav id="tabs" class="tabs"></nav>
+      <section id="form-area" class="form-area">
+        <div class="loading">加载中…</div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

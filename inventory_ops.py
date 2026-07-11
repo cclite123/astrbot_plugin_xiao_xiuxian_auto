@@ -169,6 +169,13 @@ class InventoryOpsController:
         except Exception as e:
             self._warn(f"[inventory_ops] 保存运行时名单失败：{e}")
 
+    def set_alchemy_rules(self, whitelist_pill, blacklist_equip, blacklist_artifact) -> None:
+        """整体设置炼金白/黑名单并持久化（供 WebUI Page 调用）。"""
+        self.alchemy_whitelist[CATEGORY_PILL] = self._normalize_name_set(whitelist_pill)
+        self.alchemy_blacklist[CATEGORY_EQUIP] = self._normalize_name_set(blacklist_equip)
+        self.alchemy_blacklist[CATEGORY_ARTIFACT] = self._normalize_name_set(blacklist_artifact)
+        self._save_runtime_rules()
+
 
     @staticmethod
     def normalize_name(name: str) -> str:
