@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict
@@ -27,6 +28,7 @@ from pydantic import BaseModel, Field
 
 DATA_PATH = Path(os.getenv("MARKET_PRICE_FILE", "./market_prices.json")).resolve()
 WRITE_TOKEN = os.getenv("MARKET_WRITE_TOKEN", "change-me")
+DATA_LOCK = threading.Lock()
 
 app = FastAPI(title="XiaoXiuxian Market Price Service", version="1.0.0")
 
@@ -88,22 +90,24 @@ def upload_prices(payload: BulkPricePayload, x_api_key: str = Header(default="")
     if x_api_key != WRITE_TOKEN:
         raise HTTPException(status_code=401, detail="无效上传密钥")
 
-    now = time.time()
-    data = load_prices()
-    items: Dict[str, Any] = data.setdefault("items", {})
+    # FastAPI 可并发执行同步端点；同一进程内必须将读-改-写作为一个临界区。
+    with DATA_LOCK:
+        now = time.time()
+        data = load_prices()
+        items: Dict[str, Any] = data.setdefault("items", {})
 
-    changed = 0
-    for name, item in payload.items.items():
-        clean_name = str(name or "").strip()
-        if not clean_name:
-            continue
-        items[clean_name] = {
-            "price": int(item.price),
-            "source": item.source or payload.source or "unknown",
-            "updated_at": float(item.updated_at or now),
-        }
-        changed += 1
+        changed = 0
+        for name, item in payload.items.items():
+            clean_name = str(name or "").strip()
+            if not clean_name:
+                continue
+            items[clean_name] = {
+                "price": int(item.price),
+                "source": item.source or payload.source or "unknown",
+                "updated_at": float(item.updated_at or now),
+            }
+            changed += 1
 
-    data["updated_at"] = now
-    atomic_write_json(DATA_PATH, data)
-    return {"ok": True, "changed": changed, "total": len(items), "updated_at": now}
+        data["updated_at"] = now
+        atomic_write_json(DATA_PATH, data)
+        return {"ok": True, "changed": changed, "total": len(items), "updated_at": now}

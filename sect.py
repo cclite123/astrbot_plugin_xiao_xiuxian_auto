@@ -72,16 +72,47 @@ RE_SECT_LIMIT = re.compile(r"已完成4次，今日无法再获取宗门任务�
 
 RE_SECT_LOW_HP = re.compile(r"状态欠佳|没过两招就力不从心|浪费了一次出门机会|不扣你任务次数了")
 
-SECLUSION_MIN_SEC = 180
-CULTIVATE_MIN_COUNT = 3
-
 class SectController:
-    def __init__(self, store: JsonStore, official_qq: str, logger=None):
+    def __init__(self, store: JsonStore, official_qq: str, config: Optional[Dict[str, Any]] = None, logger=None):
         self.store = store
         self.official_qq = official_qq
         self.log = logger
+        self.config = dict(config or {})
+
+        self.default_daily_hour, self.default_daily_minute = self._parse_daily_time(
+            self.config.get("daily_start_time", "06:30")
+        )
+        configured_tasks = self.config.get("default_enabled_tasks", [])
+        enabled_tasks = {
+            str(task).strip()
+            for task in configured_tasks
+            if str(task).strip() in TASK_MAP
+        } if isinstance(configured_tasks, list) else set()
+        self.default_tasks = {task: task in enabled_tasks for task in TASK_MAP}
+        self.response_timeout_sec = max(10, int(self.config.get("response_timeout_sec", 120)))
+        self.task_refresh_delay_sec = max(1, int(self.config.get("task_refresh_delay_sec", 70)))
+        self.hp_recovery_min_sec = max(1, int(self.config.get("hp_recovery_min_sec", 180)))
+        self.hp_recovery_cultivate_count = max(
+            1, int(self.config.get("hp_recovery_cultivate_count", 3))
+        )
 
         self.cultivate_ref = None
+
+    @staticmethod
+    def _parse_daily_time(value: Any) -> tuple[int, int]:
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{1,2})\s*", str(value or ""))
+        if match:
+            hour, minute = int(match.group(1)), int(match.group(2))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour, minute
+        return 6, 30
+
+    def _new_state(self) -> SectState:
+        return SectState(
+            daily_hour=self.default_daily_hour,
+            daily_minute=self.default_daily_minute,
+            tasks=dict(self.default_tasks),
+        )
 
     def bind_cultivate(self, cultivate):
 
@@ -91,7 +122,8 @@ class SectController:
         if self.log: self.log.info(msg)
 
     async def _get(self, key: str) -> SectState:
-        return SectState.from_dict(await self.store.get(f"sect:{key}"))
+        data = await self.store.get(f"sect:{key}")
+        return SectState.from_dict(data) if data else self._new_state()
 
     async def _set(self, key: str, st: SectState) -> None:
         await self.store.set(f"sect:{key}", st.to_dict())
@@ -111,7 +143,7 @@ class SectController:
         st = await self._get(key)
         st.enabled = True
         st.phase = "PROBING"
-        st.next_action_ts = time.time() + 120
+        st.next_action_ts = time.time() + self.response_timeout_sec
         await self._set(key, st)
         await send_cb(f"@{self.official_qq} 宗门任务接取")
         return ("✅ 已开启自动宗门任务，已加入互斥玩法队列。\n"
@@ -173,7 +205,7 @@ class SectController:
         st.next_action_ts = time.time() + 10
         await self._set(key, st)
         self._info(f"[sect] {key} 气血不足，暂停宗门任务，进入休养")
-        recover_hint_ts = time.time() + SECLUSION_MIN_SEC
+        recover_hint_ts = time.time() + self.hp_recovery_min_sec
         await send_cb(f"⚠️ 卡比提醒：气血不足，宗门任务已暂停，正在自动回血；预计最早 {fmt_ts(recover_hint_ts)} 后继续。")
 
 
@@ -187,18 +219,18 @@ class SectController:
 
         if self.cultivate_ref is None:
 
-            return time.time() - st.hp_rest_start_ts >= SECLUSION_MIN_SEC
+            return time.time() - st.hp_rest_start_ts >= self.hp_recovery_min_sec
 
         cult_st = await self.cultivate_ref._get(key)
         mode = cult_st.mode
 
         if mode in ("闭关", "宗门闭关"):
-            return time.time() - st.hp_rest_start_ts >= SECLUSION_MIN_SEC
+            return time.time() - st.hp_rest_start_ts >= self.hp_recovery_min_sec
         elif mode == "修炼":
-            return st.hp_cultivate_count >= CULTIVATE_MIN_COUNT
+            return st.hp_cultivate_count >= self.hp_recovery_cultivate_count
         else:
 
-            return time.time() - st.hp_rest_start_ts >= SECLUSION_MIN_SEC
+            return time.time() - st.hp_rest_start_ts >= self.hp_recovery_min_sec
 
 
     async def on_official_text(self, key: str, text: str, send_cb) -> None:
@@ -217,7 +249,7 @@ class SectController:
             if "本次修炼增加" in text:
                 st.hp_cultivate_count += 1
                 await self._set(key, st)
-                self._info(f"[sect] {key} 回血中修炼计数 {st.hp_cultivate_count}/{CULTIVATE_MIN_COUNT}")
+                self._info(f"[sect] {key} 回血中修炼计数 {st.hp_cultivate_count}/{self.hp_recovery_cultivate_count}")
             return
 
 
@@ -245,7 +277,7 @@ class SectController:
 
             st.phase = "PROBING"
             st.wake_at_ts = 0.0
-            st.next_action_ts = time.time() + 120
+            st.next_action_ts = time.time() + self.response_timeout_sec
             await self._set(key, st)
             self._info(f"[sect] {key} 宗门任务完成，继续接取下一轮")
             await send_cb("✅ 宗门任务完成，正在继续接取下一轮。")
@@ -263,7 +295,7 @@ class SectController:
             if st.tasks.get(found_task, False):
 
                 st.phase = "WORKING"
-                st.next_action_ts = time.time() + 120
+                st.next_action_ts = time.time() + self.response_timeout_sec
                 await self._set(key, st)
                 self._info(f"[sect] {key} 命中目标「{found_task}」，正在完成")
                 await send_cb(f"✅ 宗门任务已接取：{TASK_MAP.get(found_task, found_task)}，正在立即完成；若 2 分钟内未收到回执将自动重试。")
@@ -271,7 +303,7 @@ class SectController:
             else:
 
                 st.phase = "WAITING_REFRESH"
-                st.next_action_ts = time.time() + 70
+                st.next_action_ts = time.time() + self.task_refresh_delay_sec
                 await self._set(key, st)
                 self._info(f"[sect] {key} 任务「{found_task}」未开启，70s后刷新")
                 await send_cb(f"🔄 宗门任务「{TASK_MAP.get(found_task, found_task)}」不在目标列表，预计 {fmt_ts(st.next_action_ts)} 刷新。")
@@ -315,7 +347,7 @@ class SectController:
             if st.wake_at_ts and now >= st.wake_at_ts:
                 st.phase = "PROBING"
                 st.wake_at_ts = 0.0
-                st.next_action_ts = now + 120
+                st.next_action_ts = now + self.response_timeout_sec
                 updated = True
                 self._info(f"[sect] {key} 到达预定时间，开启今日宗门任务")
                 await send_cb("⏰ 已到自动宗门任务时间，正在接取宗门任务。")
@@ -324,7 +356,7 @@ class SectController:
         elif st.phase == "WAITING_REFRESH":
             if st.next_action_ts and now >= st.next_action_ts:
                 st.phase = "REFRESHING"
-                st.next_action_ts = now + 120
+                st.next_action_ts = now + self.response_timeout_sec
                 updated = True
                 await send_cb("🔄 已到宗门任务刷新时间，正在刷新。")
                 await send_cb(f"@{self.official_qq} 宗门任务刷新")
@@ -333,7 +365,7 @@ class SectController:
         elif st.phase in ("PROBING", "REFRESHING", "WORKING"):
             if st.next_action_ts and now >= st.next_action_ts:
                 st.phase = "PROBING"
-                st.next_action_ts = now + 120
+                st.next_action_ts = now + self.response_timeout_sec
                 updated = True
                 await send_cb("⚠️ 宗门任务 2 分钟无有效回执，正在重新接取。")
                 await send_cb(f"@{self.official_qq} 宗门任务接取")

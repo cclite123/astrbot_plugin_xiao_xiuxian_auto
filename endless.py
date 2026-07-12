@@ -280,7 +280,11 @@ class EndlessTowerController:
             return
         text = str(text or "")
 
-        if RE_CHALLENGE_FAIL.search(text):
+        if (
+            st.phase == "WAITING_CHALLENGE"
+            and st.pending_action == "challenge"
+            and RE_CHALLENGE_FAIL.search(text)
+        ):
             st.enabled = False
             st.phase = "IDLE"
             st.next_action_ts = 0.0
@@ -291,7 +295,11 @@ class EndlessTowerController:
                 await send_cb(f"🛑 自动无尽妖塔：挑战失败（{_format_limit(st.done_count, st.target_count)}），已关闭。")
             return
 
-        if RE_CHALLENGE_OK.search(text):
+        if (
+            st.phase == "WAITING_CHALLENGE"
+            and st.pending_action == "challenge"
+            and RE_CHALLENGE_OK.search(text)
+        ):
             st.done_count += 1
             st.failure_count = 0
             st.pending_action = ""

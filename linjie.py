@@ -1431,7 +1431,7 @@ class LinjieUpgradeController:
                 else:
                     remaining = 0.0
                 lines.append(
-                    f"  {idx}. {'\u2705' if affordable else '\u23f3'} {step.get('note')} "
+                    f"  {idx}. {'✅' if affordable else '⏳'} {step.get('note')} "
                     f"成本{format_money(cost)} 增产{format_speed(gain)} ROI{roi:.2f}天"
                 )
             if len(steps) > 5:
@@ -1465,7 +1465,7 @@ class LinjieUpgradeController:
             total_gain += gain
             wait_tag = "" if affordable else f"(攒矿{format_duration(wait_sec)})"
             lines.append(
-                f"{idx}. {'\u2705' if affordable else '\u23f3'} {step.get('note')} "
+                f"{idx}. {'✅' if affordable else '⏳'} {step.get('note')} "
                 f"成本{format_money(cost)} 增产{format_speed(gain)} "
                 f"ROI{roi:.2f}天 {wait_tag}"
             )

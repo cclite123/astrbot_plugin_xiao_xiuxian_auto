@@ -64,6 +64,7 @@ function fieldType(item) {
   if (!item || typeof item !== 'object') return 'text';
   if (item.type === 'bool') return 'bool';
   if (item.type === 'int' || item.type === 'number' || item.type === 'float') return 'number';
+  if (item.type === 'list') return 'list';
   if (Array.isArray(item.options) && item.options.length) return 'select';
   if (item.type === 'object') return 'object';
   return 'text';
@@ -113,6 +114,22 @@ function renderField(key, item, value, path) {
     const inp = document.createElement('input'); inp.type = 'number'; inp.value = value ?? 0;
     inp.addEventListener('change', () => setConfig(path, Number(inp.value)));
     wrap.appendChild(inp);
+  } else if (t === 'list') {
+    const input = document.createElement('textarea');
+    input.rows = 4;
+    input.placeholder = '每行一项，也可用逗号分隔';
+    const entries = Array.isArray(value)
+      ? value
+      : (typeof value === 'string' ? value.split(/[\n,，、]/) : []);
+    input.value = entries.map(v => String(v).trim()).filter(Boolean).join('\n');
+    input.addEventListener('change', () => {
+      const items = input.value
+        .split(/[\n,，、]/)
+        .map(v => v.trim())
+        .filter(Boolean);
+      setConfig(path, items);
+    });
+    wrap.appendChild(input);
   } else if (t === 'object') {
     const sub = document.createElement('div'); sub.className = 'subgroup';
     const items = item.items || {};

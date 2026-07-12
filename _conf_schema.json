@@ -87,6 +87,45 @@
       }
     }
   },
+  "sect": {
+    "description": "宗门任务模块配置",
+    "type": "object",
+    "hint": "配置会用于首次创建账号的宗门任务状态；已通过指令设置过的账号保持其原有任务和时间。",
+    "items": {
+      "daily_start_time": {
+        "description": "默认每日启动时间",
+        "type": "string",
+        "hint": "格式 HH:MM，如 06:30。",
+        "default": "06:30"
+      },
+      "default_enabled_tasks": {
+        "description": "默认启用的任务目标",
+        "type": "list",
+        "hint": "可选：密令、除魔、仙丹、疏财、红尘；留空表示首次使用时不预选任务。",
+        "default": []
+      },
+      "response_timeout_sec": {
+        "description": "任务回执超时（秒）",
+        "type": "int",
+        "default": 120
+      },
+      "task_refresh_delay_sec": {
+        "description": "非目标任务刷新等待（秒）",
+        "type": "int",
+        "default": 70
+      },
+      "hp_recovery_min_sec": {
+        "description": "气血恢复最短等待（秒）",
+        "type": "int",
+        "default": 180
+      },
+      "hp_recovery_cultivate_count": {
+        "description": "修炼回血完成所需次数",
+        "type": "int",
+        "default": 3
+      }
+    }
+  },
   "coordinator": {
     "description": "任务协调器配置",
     "type": "object",

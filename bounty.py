@@ -34,7 +34,7 @@ TIER_PRICES: Dict[str, int] = {
 PRIORITY_SPECIAL_ITEMS: List[str] = [
     "五指拳心剑",
     "真龙九变",
-    "坐忘论"
+    "坐忘论",
     "无瑕七绝剑",
 ]
 

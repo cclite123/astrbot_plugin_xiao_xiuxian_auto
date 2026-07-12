@@ -31,6 +31,21 @@
     "daily_start_time": "12:35",
     "jitter_seconds": 600
   },
+  "_comment_sect": "宗门任务模块配置；默认时间和目标仅用于首次创建账号的宗门任务状态，回执、刷新和回血参数全局生效。",
+  "sect": {
+    "_comment_daily_start_time": "默认每日启动时间，格式 HH:MM；已通过“宗门任务时间”设置过的账号保持其设置。",
+    "daily_start_time": "06:30",
+    "_comment_default_enabled_tasks": "首次使用时默认启用的任务目标；可选：密令、除魔、仙丹、疏财、红尘。留空表示不预选。",
+    "default_enabled_tasks": [],
+    "_comment_response_timeout_sec": "接取、刷新或完成宗门任务后等待有效回执的超时时间。",
+    "response_timeout_sec": 120,
+    "_comment_task_refresh_delay_sec": "接到非目标任务后等待多久发送“宗门任务刷新”。",
+    "task_refresh_delay_sec": 70,
+    "_comment_hp_recovery_min_sec": "气血不足时进入恢复状态的最短等待时间。",
+    "hp_recovery_min_sec": 180,
+    "_comment_hp_recovery_cultivate_count": "在修炼模式下，收到多少次修炼回执后视为气血已恢复。",
+    "hp_recovery_cultivate_count": 3
+  },
   "_comment_coordinator": "任务协调器配置；控制多个自动任务之间的发送间隔和执行顺序。",
   "coordinator": {
     "command_delay_sec": 2.0,
