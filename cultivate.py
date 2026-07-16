@@ -234,11 +234,12 @@ class CultivateController:
         st = await self._get(key)
         if not st.mode:
             return
+        was_resting = st.is_resting
         if st.mode not in (MODE_SECLUSION, MODE_SECT_SECLUSION):
             st.is_resting = False
         st.suspended_for_activity = True
         st.last_action_ts = time.time()
-        if st.mode in (MODE_SECLUSION, MODE_SECT_SECLUSION):
+        if st.mode in (MODE_SECLUSION, MODE_SECT_SECLUSION) and was_resting:
             st.hp_check_ts = 0.0
         await self._set(key, st)
 

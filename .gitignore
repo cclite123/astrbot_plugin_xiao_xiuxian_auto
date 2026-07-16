@@ -30,6 +30,8 @@ deploy-config.json
 data/*_cache*.json
 data/*_runtime_config.json
 data/page_config_override.json
+data/account_config_overrides.json
+data/accounts/
 
 # Logs
 *.log

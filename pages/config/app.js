@@ -2,8 +2,6 @@ const _realBridge = window.AstrBotPluginPage;
 const PREVIEW_MODE = !_realBridge;
 
 const MOCK_SCHEMA = {
-  official_bot_qq: { description: '官方机器人 QQ 号', type: 'string', hint: '所有需要 @小小 的指令都会使用这里的号码。', default: '3889001741' },
-  test_mode: { description: '测试模式', type: 'bool', hint: 'false 为真实发送指令，true 通常用于调试时避免部分真实操作。', default: false },
   bounty: { description: '悬赏模块配置', type: 'object', hint: '控制悬赏策略、重试时间、每日启动时间和随机抖动。', items: {
     default_strategy: { description: '默认悬赏策略', type: 'string', hint: '修为：优先修为收益；价值：优先额外机缘价值；耗时：优先最短耗时。', options: ['修为','价值','耗时'], default: '价值' },
     retry_when_running_sec: { description: '运行中重试间隔（秒）', type: 'int', default: 30 },
@@ -11,20 +9,23 @@ const MOCK_SCHEMA = {
   }},
 };
 const MOCK_CONFIG = {
-  official_bot_qq: '3889001741',
-  test_mode: false,
   bounty: { default_strategy: '价值', retry_when_running_sec: 30, next_morning_hour: 8 },
 };
+const MOCK_ACCOUNTS = [
+  { self_id: '123456789', groups: ['10001', '10002'] },
+  { self_id: '987654321', groups: ['20001'] },
+];
 
 const bridge = _realBridge || {
   ready: async () => ({ pluginName: 'preview', isDark: false }),
   getContext: () => ({ isDark: false }),
   onContext: () => {},
   apiGet: async (ep) => {
-    if (ep === 'config') return { config: MOCK_CONFIG, schema: MOCK_SCHEMA };
-    if (ep === 'status') return { bound_keys: 3, test_mode: false, market_price_enabled: true };
-    if (ep === 'alchemy_rules') return { whitelist_pill: ['培元丹','回元丹','养元丹'], blacklist_equip: ['龙渊剑','惊雷'], blacklist_artifact: ['两仪心经'] };
-    if (ep === 'herb_prices') return { prices: { '罗犀草': 100, '何首乌': 500, '九叶芝': 2000, '地心火芝': 8000 } };
+    if (ep === 'accounts') return { accounts: MOCK_ACCOUNTS };
+    if (ep.startsWith('config?')) return { config: MOCK_CONFIG, schema: MOCK_SCHEMA };
+    if (ep === 'status') return { bound_keys: 3 };
+    if (ep.startsWith('alchemy_rules?')) return { whitelist_pill: ['培元丹','回元丹','养元丹'], blacklist_equip: ['龙渊剑','惊雷'], blacklist_artifact: ['两仪心经'] };
+    if (ep.startsWith('herb_prices?')) return { prices: { '罗犀草': 100, '何首乌': 500, '九叶芝': 2000, '地心火芝': 8000 } };
     return {};
   },
   apiPost: async (ep, body) => { console.log('[preview] save', ep, body); return { ok: true, reloaded: true }; },
@@ -35,10 +36,13 @@ const formEl = document.getElementById('form-area');
 const searchEl = document.getElementById('search');
 const saveBtn = document.getElementById('save-btn');
 const statusLine = document.getElementById('status-line');
+const accountSelectEl = document.getElementById('account-select');
 
 let schema = {};
 let config = {};
 let currentTab = null;
+let currentAccount = '';
+let accountLoadGeneration = 0;
 
 const SPECIAL_TABS = [
   { key: '__alchemy', label: '炼金名单', icon: '🧪' },
@@ -58,6 +62,10 @@ function toast(msg, ok = true) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 3000);
+}
+
+function accountEndpoint(name, selfId = currentAccount) {
+  return `${name}?self_id=${encodeURIComponent(selfId)}`;
 }
 
 function fieldType(item) {
@@ -182,11 +190,14 @@ function renderTab(modKey) {
 }
 
 function renderAlchemyTab() {
+  const selfId = currentAccount;
+  const generation = accountLoadGeneration;
   saveBtn.style.display = 'none';
   searchEl.style.display = 'none';
   [...tabsEl.children].forEach(b => b.classList.toggle('active', b.dataset.key === '__alchemy'));
   formEl.innerHTML = '<div class="loading">加载炼金名单…</div>';
-  bridge.apiGet('alchemy_rules').then(data => {
+  bridge.apiGet(accountEndpoint('alchemy_rules', selfId)).then(data => {
+    if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
     const wl = (data && data.whitelist_pill) || [];
     const be = (data && data.blacklist_equip) || [];
     const ba = (data && data.blacklist_artifact) || [];
@@ -212,13 +223,14 @@ function renderAlchemyTab() {
     `;
     document.getElementById('save-rules-btn').addEventListener('click', saveAlchemyRules);
   }).catch(e => {
+    if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
     formEl.innerHTML = '<div class="loading">加载名单失败：' + (e && e.message ? e.message : e) + '</div>';
   });
 }
 
 function saveAlchemyRules() {
   const get = id => document.getElementById(id).value.split('\n').map(s => s.trim()).filter(Boolean);
-  const payload = { whitelist_pill: get('wl-pill'), blacklist_equip: get('bl-equip'), blacklist_artifact: get('bl-art') };
+  const payload = { self_id: currentAccount, whitelist_pill: get('wl-pill'), blacklist_equip: get('bl-equip'), blacklist_artifact: get('bl-art') };
   const btn = document.getElementById('save-rules-btn');
   btn.disabled = true; btn.textContent = '保存中…';
   bridge.apiPost('alchemy_rules/save', payload)
@@ -228,11 +240,14 @@ function saveAlchemyRules() {
 }
 
 function renderHerbTab() {
+  const selfId = currentAccount;
+  const generation = accountLoadGeneration;
   saveBtn.style.display = 'none';
   searchEl.style.display = 'none';
   [...tabsEl.children].forEach(b => b.classList.toggle('active', b.dataset.key === '__herb'));
   formEl.innerHTML = '<div class="loading">加载药材上限价…</div>';
-  bridge.apiGet('herb_prices').then(data => {
+  bridge.apiGet(accountEndpoint('herb_prices', selfId)).then(data => {
+    if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
     const prices = (data && data.prices) || {};
     formEl.innerHTML = `
       <div class="section-title">🌿 药材购买上限价</div>
@@ -250,6 +265,7 @@ function renderHerbTab() {
     document.getElementById('add-herb-btn').addEventListener('click', () => listEl.appendChild(makeHerbRow('', '')));
     document.getElementById('save-herb-btn').addEventListener('click', saveHerbPrices);
   }).catch(e => {
+    if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
     formEl.innerHTML = '<div class="loading">加载药材价格失败：' + (e && e.message ? e.message : e) + '</div>';
   });
 }
@@ -278,7 +294,7 @@ function saveHerbPrices() {
   });
   const btn = document.getElementById('save-herb-btn');
   btn.disabled = true; btn.textContent = '保存中…';
-  bridge.apiPost('herb_prices/save', { prices })
+  bridge.apiPost('herb_prices/save', { self_id: currentAccount, prices })
     .then(() => toast('✅ 药材价格已保存并生效', true))
     .catch(e => toast('❌ 保存失败：' + (e && e.message ? e.message : e), false))
     .finally(() => { btn.disabled = false; btn.textContent = '保存价格'; });
@@ -313,14 +329,17 @@ searchEl.addEventListener('input', () => {
 });
 
 saveBtn.addEventListener('click', async () => {
-  if (!confirm('保存后将热重载全部模块，进行中的操作会被中断。确认保存？')) return;
+  if (!currentAccount) return;
+  if (!confirm(`保存会中断该账号正在进行的任务，其他账号不受影响。\n\n确认保存账号 ${currentAccount}？`)) return;
+  const selfId = currentAccount;
   saveBtn.disabled = true;
+  accountSelectEl.disabled = true;
   saveBtn.textContent = '保存中…';
   try {
-    const res = await bridge.apiPost('config/save', { config });
+    const res = await bridge.apiPost('config/save', { self_id: selfId, config });
     if (res && res.reloaded) {
-      toast('✅ 已保存并热重载', true);
-      statusLine.textContent = '配置已生效。进行中的操作已被中断并重新加载。';
+      toast('✅ 当前账号配置已保存', true);
+      statusLine.textContent = `账号 ${selfId} 的配置已生效，其他账号未重载。`;
     } else {
       toast('⚠️ 已保存，但热重载未完成', false);
       statusLine.textContent = '配置已写入，请手动重载插件使其完全生效。';
@@ -329,9 +348,32 @@ saveBtn.addEventListener('click', async () => {
     toast('❌ 保存失败：' + (e && e.message ? e.message : e), false);
   } finally {
     saveBtn.disabled = false;
-    saveBtn.textContent = '保存并热重载';
+    accountSelectEl.disabled = false;
+    saveBtn.textContent = '保存当前账号';
   }
 });
+
+async function loadAccount(selfId) {
+  const generation = ++accountLoadGeneration;
+  currentAccount = selfId;
+  saveBtn.disabled = true;
+  formEl.innerHTML = '<div class="loading">加载账号配置…</div>';
+  try {
+    const data = await bridge.apiGet(accountEndpoint('config', selfId));
+    if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
+    schema = (data && data.schema) || {};
+    config = (data && data.config) || {};
+    renderTabs();
+    statusLine.textContent = `当前账号 ${currentAccount}`;
+  } catch (e) {
+    if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
+    formEl.innerHTML = '<div class="loading">加载配置失败：' + (e && e.message ? e.message : e) + '</div>';
+  } finally {
+    if (generation === accountLoadGeneration && selfId === currentAccount) {
+      saveBtn.disabled = !currentAccount;
+    }
+  }
+}
 
 async function init() {
   try {
@@ -347,17 +389,31 @@ async function init() {
   applyTheme();
   bridge.onContext(applyTheme);
   try {
-    const data = await bridge.apiGet('config');
-    schema = (data && data.schema) || {};
-    config = (data && data.config) || {};
-    renderTabs();
+    const data = await bridge.apiGet('accounts');
+    const accounts = (data && data.accounts) || [];
+    accountSelectEl.innerHTML = '';
+    accounts.forEach(account => {
+      const option = document.createElement('option');
+      option.value = account.self_id;
+      const groups = Array.isArray(account.groups) && account.groups.length ? ` · ${account.groups.join('、')}` : '';
+      option.textContent = `${account.self_id}${groups}`;
+      accountSelectEl.appendChild(option);
+    });
+    if (!accounts.length) {
+      accountSelectEl.disabled = true;
+      saveBtn.disabled = true;
+      formEl.innerHTML = '<div class="loading">暂无已配置或已绑定账号</div>';
+      return;
+    }
+    accountSelectEl.addEventListener('change', () => loadAccount(accountSelectEl.value));
+    await loadAccount(accounts[0].self_id);
   } catch (e) {
-    formEl.innerHTML = '<div class="loading">加载配置失败：' + (e && e.message ? e.message : e) + '</div>';
+    formEl.innerHTML = '<div class="loading">加载账号失败：' + (e && e.message ? e.message : e) + '</div>';
     return;
   }
   try {
     const st = await bridge.apiGet('status');
-    statusLine.textContent = `运行中 · 绑定会话 ${st.bound_keys ?? 0} · 测试模式 ${st.test_mode ? '开' : '关'} · 坊市价格 ${st.market_price_enabled ? '开' : '关'}`;
+    statusLine.textContent = `当前账号 ${currentAccount} · 绑定会话 ${st.bound_keys ?? 0}`;
   } catch (e) {
     statusLine.textContent = '';
   }

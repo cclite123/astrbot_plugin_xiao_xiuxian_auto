@@ -310,6 +310,212 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("宗门任务接取" in msg for msg in plugin._official_messages), plugin._official_messages)
         self.assertEqual([], plugin.cultivate._pending_after_exit.get(key, []))
 
+    async def test_real_send_queue_keeps_fresh_hp_between_activity_commands(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        now = time.time()
+        plugin = _make_plugin_shell(main)
+        plugin.command_delay_sec = 0
+        plugin.seclusion_guard_enabled = False
+        plugin._activity_priority = dict(main.ACTIVITY_PRIORITY)
+        plugin._last_official_command = {}
+        plugin._enqueue_official_command = types.MethodType(
+            main.XiaoXiuxianAuto._enqueue_official_command,
+            plugin,
+        )
+
+        await plugin.cultivate._set(
+            key,
+            CultivateState(
+                mode=MODE_SECT_SECLUSION,
+                is_resting=False,
+                hp_percent=99.6,
+                hp_check_ts=now,
+                hp_check_pending=False,
+                suspended_for_activity=True,
+                last_action_ts=now,
+            ),
+        )
+
+        async def send_and_drain(text: str) -> None:
+            await plugin._make_send_cb(key)(text)
+            task = plugin._send_tasks.get(key)
+            if task is not None:
+                await task
+
+        await send_and_drain("@3889001741 悬赏令查看")
+        await send_and_drain("@3889001741 探索秘境")
+
+        self.assertEqual(
+            ["@3889001741 悬赏令查看", "@3889001741 探索秘境"],
+            plugin._raw_messages,
+        )
+        self.assertFalse(
+            any(msg.endswith("我的状态") for msg in plugin._raw_messages),
+            plugin._raw_messages,
+        )
+
+    async def test_native_self_hook_ignores_generated_bounty_accept_command(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = _make_plugin_shell(main)
+        plugin._recent_self_commands = {}
+        strategy_args = []
+
+        async def is_bound(_self_id, _group_id):
+            return True
+
+        async def set_strategy(_key, strategy):
+            strategy_args.append(strategy)
+            return "unexpected"
+
+        plugin._is_bound_match = is_bound
+        plugin.bounty.cmd_set_strategy = set_strategy
+        event = {
+            "self_id": "10001",
+            "user_id": "10001",
+            "group_id": "20002",
+            "post_type": "message_sent",
+            "raw_message": "悬赏令接取1",
+        }
+
+        await plugin._handle_native_self(event, force_self=True)
+
+        self.assertEqual([], strategy_args)
+        self.assertEqual([], plugin._raw_messages)
+
+    async def test_account_business_controllers_use_isolated_config_and_files(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin.store = MemoryStore()
+        plugin.market_price = None
+        plugin.default_official_qq = "3889001741"
+        plugin.multi_cfg = {
+            "accounts": {
+                "111": {"enabled": True},
+                "222": {"enabled": True},
+            }
+        }
+        plugin.cfg = {
+            "bounty": {"default_strategy": "价值"},
+            "endless_tower": {"mp_threshold": 600},
+        }
+        plugin._account_config_overrides = {
+            "111": {
+                "bounty": {"default_strategy": "修为"},
+                "endless_tower": {"mp_threshold": 500},
+            },
+            "222": {
+                "bounty": {"default_strategy": "耗时"},
+                "endless_tower": {"mp_threshold": 900},
+            },
+        }
+        plugin._account_controllers = {}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin.data_dir = temp_dir
+            first = plugin._controller("bounty", "111:group")
+            second = plugin._controller("bounty", "222:group")
+            first_endless = plugin._controller("endless", "111:group")
+            second_endless = plugin._controller("endless", "222:group")
+            first_inventory = plugin._controller("inventory_ops", "111:group")
+            second_inventory = plugin._controller("inventory_ops", "222:group")
+            first_alchemy = plugin._controller("auto_alchemy", "111:group")
+            second_alchemy = plugin._controller("auto_alchemy", "222:group")
+
+            self.assertIsNot(first, second)
+            self.assertEqual("修为", first.default_strategy)
+            self.assertEqual("耗时", second.default_strategy)
+            self.assertEqual(500, first_endless.default_mp_threshold)
+            self.assertEqual(900, second_endless.default_mp_threshold)
+            self.assertNotEqual(first_inventory.runtime_path, second_inventory.runtime_path)
+            self.assertIn("111", first_inventory.runtime_path)
+            self.assertIn("222", second_inventory.runtime_path)
+            self.assertNotEqual(first_alchemy.herb_max_prices_path, second_alchemy.herb_max_prices_path)
+
+    async def test_account_config_save_rejects_infrastructure_fields_and_reloads_one_account(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin.cfg = {
+            "bounty": {"default_strategy": "价值"},
+            "inventory_ops": {
+                "enabled": True,
+                "market_command_price_format": "lingshi",
+            },
+            "market_price": {"remote_url": "global"},
+        }
+        plugin.multi_cfg = {"accounts": {"111": {"enabled": True}}}
+        saved = {}
+        reloaded = []
+
+        async def bound_dict():
+            return {"111": ["group"]}
+
+        async def reload_account(self_id):
+            reloaded.append(self_id)
+
+        class FakeRequest:
+            async def json(self, default=None):
+                return {
+                    "self_id": "111",
+                    "config": {
+                        "bounty": {"default_strategy": "修为"},
+                        "inventory_ops": {
+                            "enabled": False,
+                            "market_command_price_format": "raw",
+                        },
+                        "market_price": {"remote_url": "malicious"},
+                        "send_fail_policy": {"auto_unbind_on_permanent_send_error": False},
+                    },
+                }
+
+        plugin._get_bound_dict = bound_dict
+        plugin._reload_account_controllers = reload_account
+
+        def save_overrides(data):
+            saved.update(data)
+
+        with patch.object(main, "request", FakeRequest()), \
+             patch.object(main, "_load_account_overrides", return_value={}), \
+             patch.object(main, "_save_account_overrides", side_effect=save_overrides):
+            result = await plugin._page_save_config()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["111"], reloaded)
+        self.assertEqual("修为", saved["111"]["bounty"]["default_strategy"])
+        self.assertFalse(saved["111"]["inventory_ops"]["enabled"])
+        self.assertNotIn("market_command_price_format", saved["111"]["inventory_ops"])
+        self.assertNotIn("market_price", saved["111"])
+        self.assertNotIn("send_fail_policy", saved["111"])
+
+    async def test_account_reload_clears_only_target_account_queue_and_controllers(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        first_task = asyncio.create_task(asyncio.Event().wait())
+        second_task = asyncio.create_task(asyncio.Event().wait())
+        plugin._send_tasks = {"111:group": first_task, "222:group": second_task}
+        plugin._send_queues = {"111:group": ["old-a"], "222:group": ["keep-b"]}
+        plugin._activity_owner = {"111:group": "bounty", "222:group": "secret"}
+        second_controllers = {"marker": "keep"}
+        plugin._account_controllers = {"111": {"marker": "old"}, "222": second_controllers}
+        plugin._account_config_overrides = {}
+        plugin._build_account_controllers = lambda self_id: {"marker": f"new-{self_id}"}
+
+        with patch.object(main, "_load_account_overrides", return_value={"111": {}}):
+            await plugin._reload_account_controllers("111")
+
+        self.assertTrue(first_task.cancelled())
+        self.assertNotIn("111:group", plugin._send_tasks)
+        self.assertNotIn("111:group", plugin._send_queues)
+        self.assertNotIn("111:group", plugin._activity_owner)
+        self.assertEqual({"marker": "new-111"}, plugin._account_controllers["111"])
+        self.assertIs(second_controllers, plugin._account_controllers["222"])
+        self.assertEqual(["keep-b"], plugin._send_queues["222:group"])
+        self.assertFalse(second_task.done())
+
+        second_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await second_task
+
     async def test_stale_hp_low_reply_enters_recovery_without_waiting_for_activity_timeout(self):
         main = _import_main_with_astrbot_stubs()
         key = "10001:20002"

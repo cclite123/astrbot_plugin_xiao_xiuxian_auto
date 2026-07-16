@@ -1,33 +1,4 @@
 {
-  "official_bot_qq": {
-    "description": "官方机器人 QQ 号",
-    "type": "string",
-    "hint": "所有需要 @小小 的指令都会使用这里的号码。",
-    "default": "3889001741"
-  },
-  "test_mode": {
-    "description": "测试模式",
-    "type": "bool",
-    "hint": "false 为真实发送指令，true 通常用于调试时避免部分真实操作。",
-    "default": false
-  },
-  "multi_account": {
-    "description": "多账号/多群绑定配置",
-    "type": "object",
-    "hint": "一般保持默认即可。",
-    "items": {
-      "enabled": {
-        "description": "多账号功能开关",
-        "type": "bool",
-        "default": true
-      },
-      "allow_multi_groups_per_account": {
-        "description": "允许单账号多群",
-        "type": "bool",
-        "default": true
-      }
-    }
-  },
   "bounty": {
     "description": "悬赏模块配置",
     "type": "object",
@@ -126,41 +97,6 @@
       }
     }
   },
-  "coordinator": {
-    "description": "任务协调器配置",
-    "type": "object",
-    "hint": "控制多个任务之间的发送间隔和执行顺序。",
-    "items": {
-      "command_delay_sec": {
-        "description": "指令发送间隔（秒）",
-        "type": "float",
-        "default": 2.0
-      },
-      "activity_order": {
-        "description": "任务执行顺序",
-        "type": "list",
-        "hint": "如 [\"悬赏\", \"秘境\", \"宗门任务\"]。",
-        "default": ["悬赏", "秘境", "宗门任务"]
-      }
-    }
-  },
-  "send_fail_policy": {
-    "description": "发送失败处理策略",
-    "type": "object",
-    "hint": "用于永久发送失败时拉黑或解绑。",
-    "items": {
-      "auto_block_permanent_send_error": {
-        "description": "永久发送失败时拉黑",
-        "type": "bool",
-        "default": true
-      },
-      "auto_unbind_on_permanent_send_error": {
-        "description": "永久发送失败时解绑",
-        "type": "bool",
-        "default": true
-      }
-    }
-  },
   "seclusion_guard": {
     "description": "闭关/禁发保护配置",
     "type": "object",
@@ -185,63 +121,6 @@
         "description": "最大退出尝试次数",
         "type": "int",
         "default": 2
-      }
-    }
-  },
-  "market_price": {
-    "description": "坊市价格模块配置",
-    "type": "object",
-    "hint": "原有一键上架/价格缓存使用，不参与炼丹的实时成本快照规则。",
-    "items": {
-      "enabled": {
-        "description": "坊市价格模块开关",
-        "type": "bool",
-        "default": true
-      },
-      "source": {
-        "description": "数据来源模式",
-        "type": "string",
-        "hint": "local：仅本地；remote：仅远程；hybrid：混合优先远程。",
-        "default": "hybrid",
-        "options": ["local", "remote", "hybrid"]
-      },
-      "remote_url": {
-        "description": "远程价格接口地址",
-        "type": "string",
-        "hint": "留空则使用默认地址。",
-        "default": ""
-      },
-      "default_remote_url": {
-        "description": "默认远程地址",
-        "type": "string",
-        "default": "http://81.71.44.7:8808/api/prices/latest"
-      },
-      "api_key": {
-        "description": "API 密钥",
-        "type": "string",
-        "hint": "远程接口需要认证时填写。",
-        "default": ""
-      },
-      "local_path": {
-        "description": "本地缓存路径",
-        "type": "string",
-        "default": "data/market_prices_cache.json"
-      },
-      "ttl_seconds": {
-        "description": "价格有效期（秒）",
-        "type": "int",
-        "hint": "21600 = 6 小时。",
-        "default": 21600
-      },
-      "refresh_interval_sec": {
-        "description": "刷新间隔（秒）",
-        "type": "int",
-        "default": 300
-      },
-      "timeout_sec": {
-        "description": "请求超时（秒）",
-        "type": "float",
-        "default": 5.0
       }
     }
   },
@@ -279,11 +158,6 @@
         "description": "最大分页数",
         "type": "int",
         "default": 30
-      },
-      "market_command_price_format": {
-        "description": "上架价格格式",
-        "type": "string",
-        "default": "lingshi"
       }
     }
   },

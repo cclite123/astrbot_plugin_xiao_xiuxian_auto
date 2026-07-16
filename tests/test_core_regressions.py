@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 import re
+import json
 from pathlib import Path
 
 
@@ -243,6 +244,48 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
             text = path.read_text(encoding="utf-8")
             for receipt in noisy_receipts:
                 self.assertNotIn(receipt, text)
+
+    def test_infrastructure_config_is_hidden_from_both_settings_pages(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        for key in (
+            "official_bot_qq",
+            "test_mode",
+            "multi_account",
+            "coordinator",
+            "send_fail_policy",
+            "market_price",
+        ):
+            self.assertNotIn(key, schema)
+        self.assertNotIn(
+            "market_command_price_format",
+            schema.get("inventory_ops", {}).get("items", {}),
+        )
+
+        page_text = (ROOT / "pages" / "config" / "app.js").read_text(encoding="utf-8")
+        for key in (
+            "official_bot_qq",
+            "test_mode",
+            "multi_account",
+            "coordinator",
+            "send_fail_policy",
+            "market_price",
+            "market_command_price_format",
+        ):
+            self.assertNotIn(key, page_text)
+
+    def test_custom_webui_routes_all_business_data_through_selected_account(self):
+        html = (ROOT / "pages" / "config" / "index.html").read_text(encoding="utf-8")
+        page_text = (ROOT / "pages" / "config" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="account-select"', html)
+        self.assertIn("apiGet('accounts')", page_text)
+        self.assertIn("self_id", page_text)
+        self.assertIn("config/save", page_text)
+        self.assertIn("alchemy_rules/save", page_text)
+        self.assertIn("herb_prices/save", page_text)
+        self.assertIn("accountLoadGeneration", page_text)
+        self.assertIn("generation !== accountLoadGeneration", page_text)
+        self.assertIn("会中断该账号正在进行的任务", page_text)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,12 @@
     <header class="topbar">
       <h1><span class="logo">☯</span>小小修仙 · 配置中心</h1>
       <div class="actions">
+        <label class="account-picker" for="account-select">
+          <span>账号</span>
+          <select id="account-select" aria-label="选择账号"></select>
+        </label>
         <input id="search" type="search" placeholder="搜索配置项…" />
-        <button id="save-btn" class="primary">保存并热重载</button>
+        <button id="save-btn" class="primary">保存当前账号</button>
       </div>
       <div id="status-line" class="status-line"></div>
     </header>

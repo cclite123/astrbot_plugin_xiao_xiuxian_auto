@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from typing import Optional, List, Any, Dict
@@ -128,6 +129,18 @@ ACTIVITY_PRIORITY = {
     ACTIVITY_MODULE_SECT: 30,
 }
 INACTIVE_PHASES = {"IDLE", "SLEEPING"}
+
+PAGE_HIDDEN_TOP_LEVEL = {
+    "official_bot_qq",
+    "test_mode",
+    "multi_account",
+    "coordinator",
+    "send_fail_policy",
+    "market_price",
+}
+PAGE_HIDDEN_NESTED = {
+    "inventory_ops": {"market_command_price_format"},
+}
 
 
 def extract_pure_text(event) -> str:
@@ -302,6 +315,50 @@ def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str
     return result
 
 
+def _filter_account_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in (schema or {}).items():
+        if key in PAGE_HIDDEN_TOP_LEVEL or not isinstance(value, dict):
+            continue
+        item = dict(value)
+        nested_hidden = PAGE_HIDDEN_NESTED.get(key, set())
+        if nested_hidden and isinstance(item.get("items"), dict):
+            item["items"] = {
+                child_key: child_value
+                for child_key, child_value in item["items"].items()
+                if child_key not in nested_hidden
+            }
+        result[key] = item
+    return result
+
+
+def _config_for_schema(config: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, item in (schema or {}).items():
+        if key not in config:
+            continue
+        value = config[key]
+        if isinstance(value, dict) and isinstance(item, dict) and isinstance(item.get("items"), dict):
+            allowed = item["items"]
+            result[key] = {child: value[child] for child in allowed if child in value}
+        else:
+            result[key] = value
+    return result
+
+
+def _config_delta(base: Dict[str, Any], submitted: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in (submitted or {}).items():
+        base_value = (base or {}).get(key)
+        if isinstance(value, dict) and isinstance(base_value, dict):
+            nested = _config_delta(base_value, value)
+            if nested:
+                result[key] = nested
+        elif value != base_value:
+            result[key] = value
+    return result
+
+
 def _merge_missing_dict(target: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
     changed = False
     for key, value in defaults.items():
@@ -387,6 +444,59 @@ def _save_page_override(data: Dict[str, Any]) -> None:
     except Exception as e:
         logger.warning(f"[xiao_xiuxian_auto] 保存 Page 覆盖配置失败：{e}")
         raise
+
+
+def _account_overrides_path() -> str:
+    return os.path.join(_plugin_dir, "data", "account_config_overrides.json")
+
+
+def _load_account_overrides() -> Dict[str, Dict[str, Any]]:
+    path = _account_overrides_path()
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {str(key): value for key, value in data.items() if isinstance(value, dict)}
+    except Exception as e:
+        logger.warning(f"[xiao_xiuxian_auto] 读取账号配置失败：{e}")
+        return {}
+
+
+def _save_account_overrides(data: Dict[str, Dict[str, Any]]) -> None:
+    path = _account_overrides_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.warning(f"[xiao_xiuxian_auto] 保存账号配置失败：{e}")
+        raise
+
+
+class _AccountControllerProxy:
+    def __init__(self, owner, name: str, default_controller):
+        self._owner = owner
+        self._name = name
+        self._default = default_controller
+
+    def __getattr__(self, attr_name: str):
+        default_attr = getattr(self._default, attr_name)
+        if not callable(default_attr):
+            return default_attr
+
+        def routed(*args, **kwargs):
+            if args and isinstance(args[0], str) and ":" in args[0]:
+                controller = self._owner._controller(self._name, args[0])
+                return getattr(controller, attr_name)(*args, **kwargs)
+            return default_attr(*args, **kwargs)
+
+        return routed
 
 
 @register(
@@ -571,6 +681,151 @@ class XiaoXiuxianAuto(Star):
         self.seclusion_guard_max_attempts = max(1, int(sg_cfg.get("max_exit_attempts", 2)))
         self.seclusion_guard_prefer_sect_exit = bool(sg_cfg.get("prefer_sect_exit", True))
 
+        self._account_config_overrides = _load_account_overrides()
+        self._account_controllers: Dict[str, Dict[str, Any]] = {}
+        for name in (
+            "bounty", "secret", "routine", "sect", "cultivate",
+            "inventory_ops", "auto_alchemy", "linjie", "endless",
+        ):
+            setattr(self, name, _AccountControllerProxy(self, name, getattr(self, name)))
+
+    @staticmethod
+    def _self_id_from_key(key: str) -> str:
+        return str(key or "").split(":", 1)[0].strip()
+
+    def _effective_account_config(self, self_id: str) -> Dict[str, Any]:
+        override = getattr(self, "_account_config_overrides", {}).get(str(self_id), {})
+        return _deep_merge_dict(getattr(self, "cfg", {}), override)
+
+    def _account_data_dir(self, self_id: str) -> str:
+        safe_id = re.sub(r"[^0-9A-Za-z_-]", "_", str(self_id or "default")) or "default"
+        return os.path.join(self.data_dir, "accounts", safe_id)
+
+    @staticmethod
+    def _seed_account_file(source: str, target: str) -> None:
+        if os.path.exists(target) or not os.path.exists(source):
+            return
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        try:
+            shutil.copy2(source, target)
+        except Exception as e:
+            logger.warning(f"[xiao_xiuxian_auto] 初始化账号数据文件失败：{e}")
+
+    def _build_account_controllers(self, self_id: str) -> Dict[str, Any]:
+        sid = str(self_id)
+        cfg = self._effective_account_config(sid)
+        official_qq = self._official_qq_for_self(sid)
+        account_dir = self._account_data_dir(sid)
+        os.makedirs(account_dir, exist_ok=True)
+
+        bcfg = dict(cfg.get("bounty", {}) or {})
+        bounty = BountyController(
+            store=self.store,
+            official_qq=official_qq,
+            default_strategy=bcfg.get("default_strategy", "修为"),
+            retry_when_running_sec=int(bcfg.get("retry_when_running_sec", 30)),
+            post_finish_delay_sec=int(bcfg.get("post_finish_delay_sec", 30)),
+            next_morning_hour=int(bcfg.get("next_morning_hour", 8)),
+            daily_start_time=bcfg.get("daily_start_time", "08:30"),
+            jitter_seconds=int(bcfg.get("jitter_seconds", 600)),
+            logger=logger,
+            market_price=self.market_price,
+        )
+        secret_cfg = dict(cfg.get("secret", {}) or {})
+        secret = SecretController(
+            store=self.store,
+            official_qq=official_qq,
+            daily_start_time=secret_cfg.get("daily_start_time", "12:35"),
+            jitter_seconds=int(secret_cfg.get("jitter_seconds", 600)),
+            logger=logger,
+        )
+        routine = RoutineController(store=self.store, official_qq=official_qq, logger=logger)
+        sect = SectController(
+            store=self.store,
+            official_qq=official_qq,
+            config=dict(cfg.get("sect", {}) or {}),
+            logger=logger,
+        )
+        cultivate = CultivateController(store=self.store, official_qq=official_qq, logger=logger)
+        sect.bind_cultivate(cultivate)
+
+        inventory_runtime = os.path.join(account_dir, "inventory_ops_runtime_config.json")
+        self._seed_account_file(
+            os.path.join(self.data_dir, "inventory_ops_runtime_config.json"),
+            inventory_runtime,
+        )
+        inventory_ops = InventoryOpsController(
+            official_qq=official_qq,
+            market_price=self.market_price,
+            config=dict(cfg.get("inventory_ops", {}) or {}),
+            runtime_path=inventory_runtime,
+            logger=logger,
+        )
+
+        herb_prices_path = os.path.join(account_dir, "herb_max_prices.yaml")
+        self._seed_account_file(os.path.join(self.data_dir, "herb_max_prices.yaml"), herb_prices_path)
+        auto_cfg = dict(cfg.get("auto_alchemy", {}) or {})
+        auto_cfg["herb_max_prices_path"] = herb_prices_path
+        auto_alchemy = AutoAlchemyOptimizer(
+            official_qq=official_qq,
+            recipe_path=os.path.join(self.data_dir, "alchemy_recipes.txt"),
+            snapshot_path=os.path.join(account_dir, "auto_alchemy_snapshot.json"),
+            page_index_path=os.path.join(account_dir, "alchemy_page_index.json"),
+            config=auto_cfg,
+            logger=logger,
+        )
+        linjie = LinjieUpgradeController(
+            store=self.store,
+            official_qq=official_qq,
+            config=dict(cfg.get("linjie_upgrade", {}) or {}),
+            logger=logger,
+        )
+        endless = EndlessTowerController(
+            store=self.store,
+            official_qq=official_qq,
+            config=dict(cfg.get("endless_tower", {}) or {}),
+            logger=logger,
+        )
+        return {
+            "bounty": bounty,
+            "secret": secret,
+            "routine": routine,
+            "sect": sect,
+            "cultivate": cultivate,
+            "inventory_ops": inventory_ops,
+            "auto_alchemy": auto_alchemy,
+            "linjie": linjie,
+            "endless": endless,
+        }
+
+    def _controller(self, name: str, key: str):
+        sid = self._self_id_from_key(key)
+        account_controllers = getattr(self, "_account_controllers", None)
+        if not sid or account_controllers is None:
+            controller = getattr(self, name)
+            return controller._default if isinstance(controller, _AccountControllerProxy) else controller
+        if sid not in account_controllers:
+            account_controllers[sid] = self._build_account_controllers(sid)
+        return account_controllers[sid][name]
+
+    async def _reload_account_controllers(self, self_id: str) -> None:
+        sid = str(self_id)
+        for key, task in list(self._send_tasks.items()):
+            if self._self_id_from_key(key) != sid:
+                continue
+            self._send_queues.pop(key, None)
+            self._activity_owner.pop(key, None)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._send_tasks.pop(key, None)
+        self._account_config_overrides = _load_account_overrides()
+        self._account_controllers[sid] = self._build_account_controllers(sid)
+
     async def reload_config(self) -> None:
         async with self._reload_lock:
             logger.info("[xiao_xiuxian_auto] 开始热重载配置...")
@@ -610,6 +865,9 @@ class XiaoXiuxianAuto(Star):
                 f"/{PLUGIN_NAME}/config", self._page_get_config, ["GET"], "获取小小修仙插件配置"
             )
             self.context.register_web_api(
+                f"/{PLUGIN_NAME}/accounts", self._page_get_accounts, ["GET"], "获取可配置账号"
+            )
+            self.context.register_web_api(
                 f"/{PLUGIN_NAME}/config/save", self._page_save_config, ["POST"], "保存小小修仙插件配置"
             )
             self.context.register_web_api(
@@ -633,7 +891,24 @@ class XiaoXiuxianAuto(Star):
             self._page_api_enabled = False
             logger.warning(f"[xiao_xiuxian_auto] 注册 Page API 失败：{e}")
 
-    async def _page_get_config(self):
+    @staticmethod
+    def _page_query_value(name: str) -> str:
+        if request is None:
+            return ""
+        for attr_name in ("args", "query_params", "query"):
+            try:
+                values = getattr(request, attr_name, None)
+                if values is None:
+                    continue
+                value = values.get(name) if hasattr(values, "get") else None
+                if value is not None:
+                    return str(value).strip()
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    def _load_page_schema() -> Dict[str, Any]:
         schema = {}
         schema_path = os.path.join(_plugin_dir, "_conf_schema.json")
         try:
@@ -642,40 +917,85 @@ class XiaoXiuxianAuto(Star):
                     schema = json.load(f)
         except Exception as e:
             logger.warning(f"[xiao_xiuxian_auto] 读取 _conf_schema.json 失败：{e}")
-        return json_response({"config": self.cfg, "schema": schema})
+        return _filter_account_schema(schema)
+
+    async def _page_account_rows(self) -> List[Dict[str, Any]]:
+        bounds = await self._get_bound_dict()
+        account_ids = {str(sid) for sid in bounds if str(sid) != "default"}
+        configured = self.multi_cfg.get("accounts", {})
+        if isinstance(configured, dict):
+            account_ids.update(
+                str(sid)
+                for sid, profile in configured.items()
+                if str(sid) != "default" and isinstance(profile, dict)
+            )
+        return [
+            {"self_id": sid, "groups": list(bounds.get(sid, []))}
+            for sid in sorted(account_ids)
+        ]
+
+    async def _page_get_accounts(self):
+        return json_response({"accounts": await self._page_account_rows()})
+
+    async def _page_validate_account(self, self_id: str) -> bool:
+        return str(self_id) in {row["self_id"] for row in await self._page_account_rows()}
+
+    async def _page_get_config(self):
+        self_id = self._page_query_value("self_id")
+        if not self_id or not await self._page_validate_account(self_id):
+            return error_response("请选择已配置或已绑定账号", status_code=400)
+        schema = self._load_page_schema()
+        effective = self._effective_account_config(self_id)
+        return json_response({
+            "self_id": self_id,
+            "config": _config_for_schema(effective, schema),
+            "schema": schema,
+        })
 
     async def _page_save_config(self):
         if request is None:
             return error_response("web API 不可用", status_code=500)
         payload = await request.json(default={})
         new_config = payload.get("config") if isinstance(payload, dict) else None
+        self_id = str(payload.get("self_id") or "").strip() if isinstance(payload, dict) else ""
+        if not self_id or not await self._page_validate_account(self_id):
+            return error_response("请选择已配置或已绑定账号", status_code=400)
         if not isinstance(new_config, dict):
             return error_response("config 必须是对象", status_code=400)
         try:
-            _save_page_override(new_config)
+            schema = self._load_page_schema()
+            sanitized = _config_for_schema(new_config, schema)
+            overrides = _load_account_overrides()
+            delta = _config_delta(_config_for_schema(self.cfg, schema), sanitized)
+            if delta:
+                overrides[self_id] = delta
+            else:
+                overrides.pop(self_id, None)
+            _save_account_overrides(overrides)
         except Exception:
             return error_response("保存配置失败", status_code=500)
         reloaded = False
         try:
-            await self.reload_config()
+            await self._reload_account_controllers(self_id)
             reloaded = True
         except Exception as e:
-            logger.warning(f"[xiao_xiuxian_auto] 配置热重载失败：{e}")
-        return json_response({"ok": True, "reloaded": reloaded})
+            logger.warning(f"[xiao_xiuxian_auto] 账号配置热重载失败：{e}")
+        return json_response({"ok": True, "self_id": self_id, "reloaded": reloaded})
 
     async def _page_get_status(self):
         return json_response({
             "initialized": True,
             "page_api_enabled": getattr(self, "_page_api_enabled", False),
             "bound_keys": len(self._known_keys),
-            "test_mode": bool(self.cfg.get("test_mode", False)),
-            "multi_account_enabled": self.multi_account_enabled,
-            "market_price_enabled": self.market_price.enabled,
         })
 
     async def _page_get_alchemy_rules(self):
-        inv = self.inventory_ops
+        self_id = self._page_query_value("self_id")
+        if not self_id or not await self._page_validate_account(self_id):
+            return error_response("请选择已配置或已绑定账号", status_code=400)
+        inv = self._controller("inventory_ops", f"{self_id}:page")
         return json_response({
+            "self_id": self_id,
             "whitelist_pill": sorted(inv.alchemy_whitelist.get("丹药", set())),
             "blacklist_equip": sorted(inv.alchemy_blacklist.get("装备", set())),
             "blacklist_artifact": sorted(inv.alchemy_blacklist.get("神物", set())),
@@ -685,31 +1005,41 @@ class XiaoXiuxianAuto(Star):
         if request is None:
             return error_response("web API 不可用", status_code=500)
         payload = await request.json(default={})
+        self_id = str(payload.get("self_id") or "").strip() if isinstance(payload, dict) else ""
+        if not self_id or not await self._page_validate_account(self_id):
+            return error_response("请选择已配置或已绑定账号", status_code=400)
         try:
-            self.inventory_ops.set_alchemy_rules(
+            self._controller("inventory_ops", f"{self_id}:page").set_alchemy_rules(
                 payload.get("whitelist_pill") or [],
                 payload.get("blacklist_equip") or [],
                 payload.get("blacklist_artifact") or [],
             )
         except Exception as e:
             return error_response(f"保存名单失败：{e}", status_code=500)
-        return json_response({"ok": True})
+        return json_response({"ok": True, "self_id": self_id})
 
     async def _page_get_herb_prices(self):
-        return json_response({"prices": dict(self.auto_alchemy.herb_max_prices or {})})
+        self_id = self._page_query_value("self_id")
+        if not self_id or not await self._page_validate_account(self_id):
+            return error_response("请选择已配置或已绑定账号", status_code=400)
+        optimizer = self._controller("auto_alchemy", f"{self_id}:page")
+        return json_response({"self_id": self_id, "prices": dict(optimizer.herb_max_prices or {})})
 
     async def _page_save_herb_prices(self):
         if request is None:
             return error_response("web API 不可用", status_code=500)
         payload = await request.json(default={})
         prices = payload.get("prices") if isinstance(payload, dict) else None
+        self_id = str(payload.get("self_id") or "").strip() if isinstance(payload, dict) else ""
+        if not self_id or not await self._page_validate_account(self_id):
+            return error_response("请选择已配置或已绑定账号", status_code=400)
         if not isinstance(prices, dict):
             return error_response("prices 必须是对象", status_code=400)
         try:
-            self.auto_alchemy.set_herb_max_prices(prices)
+            self._controller("auto_alchemy", f"{self_id}:page").set_herb_max_prices(prices)
         except Exception as e:
             return error_response(f"保存药材价格失败：{e}", status_code=500)
-        return json_response({"ok": True})
+        return json_response({"ok": True, "self_id": self_id})
 
     async def initialize(self):
         self.store.start()
@@ -1205,16 +1535,16 @@ class XiaoXiuxianAuto(Star):
                     self._known_keys.add(bound_key)
                     send_cb = self._make_send_cb(bound_key)
                     if send_cb is not None:
-                        await self.bounty.tick(bound_key, send_cb)
-                        await self.secret.tick(bound_key, send_cb)
-                        await self.routine.tick(bound_key, send_cb)
-                        await self.sect.tick(bound_key, send_cb)
+                        await self._controller("bounty", bound_key).tick(bound_key, send_cb)
+                        await self._controller("secret", bound_key).tick(bound_key, send_cb)
+                        await self._controller("routine", bound_key).tick(bound_key, send_cb)
+                        await self._controller("sect", bound_key).tick(bound_key, send_cb)
                         await self._maybe_restore_rest_after_activities_done(bound_key, send_cb)
-                        await self.cultivate.tick(bound_key, send_cb)
-                        await self.inventory_ops.tick(bound_key, send_cb)
-                        await self.auto_alchemy.tick(bound_key, send_cb)
-                        await self.linjie.tick(bound_key, send_cb)
-                        await self.endless.tick(bound_key, send_cb)
+                        await self._controller("cultivate", bound_key).tick(bound_key, send_cb)
+                        await self._controller("inventory_ops", bound_key).tick(bound_key, send_cb)
+                        await self._controller("auto_alchemy", bound_key).tick(bound_key, send_cb)
+                        await self._controller("linjie", bound_key).tick(bound_key, send_cb)
+                        await self._controller("endless", bound_key).tick(bound_key, send_cb)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1261,13 +1591,14 @@ class XiaoXiuxianAuto(Star):
 
     async def cmd_task_status(self, key: str) -> str:
 
-        bounty_st = await self.bounty._get(key)
-        secret_st = await self.secret._get(key)
-        routine_st = await self.routine._get(key)
-        sect_st = await self.sect._get(key)
-        cult_st = await self.cultivate._get(key)
-        linjie_st = await self.linjie._get(key)
-        endless_st = await self.endless._get(key)
+        linjie = self._controller("linjie", key)
+        bounty_st = await self._controller("bounty", key)._get(key)
+        secret_st = await self._controller("secret", key)._get(key)
+        routine_st = await self._controller("routine", key)._get(key)
+        sect_st = await self._controller("sect", key)._get(key)
+        cult_st = await self._controller("cultivate", key)._get(key)
+        linjie_st = await linjie._get(key)
+        endless_st = await self._controller("endless", key)._get(key)
 
         bounty_next = "已关闭"
         if bounty_st.enabled:
@@ -1325,7 +1656,7 @@ class XiaoXiuxianAuto(Star):
                 f"💊 领丹：{routine_line('领丹', routine_st.pill_enabled, routine_st.pill_phase, routine_st.pill_action_ts, routine_st.pill_wake_ts).split('：',1)[1]}\n"
                 f"⛏️ 挖灵石：{routine_line('挖灵石', routine_st.mine_enabled, routine_st.mine_phase, routine_st.mine_action_ts, routine_st.mine_wake_ts).split('：',1)[1]}\n"
                 f"🌾 灵田：{routine_line('灵田', routine_st.farm_enabled, routine_st.farm_phase, routine_st.farm_action_ts, routine_st.farm_wake_ts).split('：',1)[1]}\n"
-                f"🏔️ 灵界升级：{self.linjie.summary_line(linjie_st)}\n"
+                f"🏔️ 灵界升级：{linjie.summary_line(linjie_st)}\n"
                 f"🗼 无尽妖塔：{endless_next}，进度 {endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'}\n"
                 f"🧘 修炼/闭关：{cult_next}")
 
@@ -1335,13 +1666,14 @@ class XiaoXiuxianAuto(Star):
         bound_groups = await self._get_bound_groups(self_id)
         bound_group = "、".join(bound_groups) if bound_groups else "未绑定"
 
-        bounty_st = await self.bounty._get(key)
-        secret_st = await self.secret._get(key)
-        routine_st = await self.routine._get(key)
-        sect_st = await self.sect._get(key)
-        cult_st = await self.cultivate._get(key)
-        linjie_st = await self.linjie._get(key)
-        endless_st = await self.endless._get(key)
+        linjie = self._controller("linjie", key)
+        bounty_st = await self._controller("bounty", key)._get(key)
+        secret_st = await self._controller("secret", key)._get(key)
+        routine_st = await self._controller("routine", key)._get(key)
+        sect_st = await self._controller("sect", key)._get(key)
+        cult_st = await self._controller("cultivate", key)._get(key)
+        linjie_st = await linjie._get(key)
+        endless_st = await self._controller("endless", key)._get(key)
 
         if not sub_menu:
             return (f"📜 【小小修仙】总菜单 📜\n"
@@ -1353,7 +1685,7 @@ class XiaoXiuxianAuto(Star):
                     f"🔹 [日常]：签到{'✅' if routine_st.signin_enabled else '🛑'}({fmt_ts_compact(routine_st.sign_action_ts or routine_st.sign_wake_ts)}) 领丹{'✅' if routine_st.pill_enabled else '🛑'}({fmt_ts_compact(routine_st.pill_action_ts or routine_st.pill_wake_ts)}) 挖矿{'✅' if routine_st.mine_enabled else '🛑'}({fmt_ts_compact(routine_st.mine_action_ts or routine_st.mine_wake_ts)}) 灵田{'✅' if routine_st.farm_enabled else '🛑'}({fmt_ts_compact(routine_st.farm_action_ts or routine_st.farm_wake_ts)})\n"
                     f"🔹 [物品]：一键上架 / 一键炼金\n"
                     f"🔹 [炼丹]：开启炼丹 / 开启背包炼丹 / 开启购买药材 / 开启动态购买 / 炼丹 丹药 数量 / 暂停继续关闭\n"
-                    f"🔹 [灵界]：{'✅开启' if linjie_st.enabled else '🛑关闭'} | {self.linjie.summary_line(linjie_st)}\n"
+                    f"🔹 [灵界]：{'✅开启' if linjie_st.enabled else '🛑关闭'} | {linjie.summary_line(linjie_st)}\n"
                     f"🔹 [无尽]：{'✅开启' if endless_st.enabled else '🛑关闭'} | 进度:{endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'} 真元检测:{'✅' if endless_st.check_mp_enabled else '🛑'}({endless_st.mp_threshold}%)\n"
                     f"🔹 [坊市]：刷新坊市价格 / 更新坊市价格\n"
                     f"🔹 [休息]：{cult_st.mode or '未设置'} ({'休息中' if cult_st.is_resting else '活动中'}) | 气血:{cult_st.hp_percent:.1f}%\n\n"
@@ -1460,7 +1792,7 @@ class XiaoXiuxianAuto(Star):
         elif sub_menu == "灵界":
             return (f"📜 【灵界升级模块】指令说明 📜\n"
                     f"当前状态：{'✅开启' if linjie_st.enabled else '🛑关闭'}\n"
-                    f"运行阶段：{self.linjie.summary_line(linjie_st)}\n"
+                    f"运行阶段：{linjie.summary_line(linjie_st)}\n"
                     f"灵矿石缓存：{format_linjie_money(linjie_st.balance)}\n\n"
                     f"▶ 开启灵界升级\n"
                     f"▶ 关闭灵界升级\n"
@@ -1530,11 +1862,12 @@ class XiaoXiuxianAuto(Star):
                 or any(x in text for x in ["宗门任务接取", "宗门任务刷新", "宗门任务完成"])
             )
             if is_activity_cmd:
-                if not await self.cultivate.ensure_hp(key, _send, min_pct=80.0):
-                    self.cultivate.queue_pending(key, text)
+                cultivate = self._controller("cultivate", key)
+                if not await cultivate.ensure_hp(key, _send, min_pct=80.0):
+                    cultivate.queue_pending(key, text)
                     return
-                if not await self.cultivate.request_idle(key, _send):
-                    self.cultivate.queue_pending(key, text)
+                if not await cultivate.request_idle(key, _send):
+                    cultivate.queue_pending(key, text)
                     return
 
             text = self._rewrite_official_target(key, text)
@@ -1596,13 +1929,13 @@ class XiaoXiuxianAuto(Star):
 
         try:
             if module == ACTIVITY_MODULE_BOUNTY:
-                st = await self.bounty._get(key)
+                st = await self._controller("bounty", key)._get(key)
                 return bool(st.enabled and st.phase not in INACTIVE_PHASES)
             if module == ACTIVITY_MODULE_SECRET:
-                st = await self.secret._get(key)
+                st = await self._controller("secret", key)._get(key)
                 return bool(st.enabled and st.phase not in INACTIVE_PHASES)
             if module == ACTIVITY_MODULE_SECT:
-                st = await self.sect._get(key)
+                st = await self._controller("sect", key)._get(key)
                 return bool(st.enabled and st.phase not in INACTIVE_PHASES)
         except Exception as e:
             logger.warning(f"[xiao_xiuxian_auto] 检查玩法状态失败: key={key} module={module} err={e}")
@@ -1618,13 +1951,13 @@ class XiaoXiuxianAuto(Star):
     async def _any_activity_state_sleeping(self, key: str) -> bool:
 
         try:
-            b = await self.bounty._get(key)
+            b = await self._controller("bounty", key)._get(key)
             if b.enabled and b.phase == "SLEEPING":
                 return True
-            sec = await self.secret._get(key)
+            sec = await self._controller("secret", key)._get(key)
             if sec.enabled and sec.phase == "SLEEPING":
                 return True
-            sect = await self.sect._get(key)
+            sect = await self._controller("sect", key)._get(key)
             if sect.enabled and sect.phase == "SLEEPING":
                 return True
         except Exception as e:
@@ -1645,7 +1978,7 @@ class XiaoXiuxianAuto(Star):
         if not await self._any_activity_state_sleeping(key):
             return
         try:
-            await self.cultivate.request_rest(key, send_cb)
+            await self._controller("cultivate", key).request_rest(key, send_cb)
         except Exception as e:
             logger.warning(f"[xiao_xiuxian_auto] 活动结束后恢复修炼/闭关失败: key={key} err={e}")
 
@@ -1681,9 +2014,18 @@ class XiaoXiuxianAuto(Star):
         body = self._official_command_body(key, text)
         return body in {"我的状态", "修炼", "闭关", "宗门闭关", "出关", "宗门出关"}
 
-    def _detect_seclusion_block_mode(self, text: str) -> Optional[str]:
+    def _seclusion_guard_settings(self, key: str) -> Dict[str, Any]:
+        cfg = dict(self._effective_account_config(self._self_id_from_key(key)).get("seclusion_guard", {}) or {})
+        return {
+            "enabled": bool(cfg.get("enabled", getattr(self, "seclusion_guard_enabled", True))),
+            "prefer_sect_exit": bool(cfg.get("prefer_sect_exit", getattr(self, "seclusion_guard_prefer_sect_exit", True))),
+            "retry_delay_sec": max(0.0, float(cfg.get("retry_delay_sec", getattr(self, "seclusion_guard_retry_delay_sec", 1.5)))),
+            "max_exit_attempts": max(1, int(cfg.get("max_exit_attempts", getattr(self, "seclusion_guard_max_attempts", 2)))),
+        }
 
-        if not self.seclusion_guard_enabled:
+    def _detect_seclusion_block_mode(self, key: str, text: str) -> Optional[str]:
+
+        if not self._seclusion_guard_settings(key)["enabled"]:
             return None
         text = str(text or "")
 
@@ -1729,7 +2071,7 @@ class XiaoXiuxianAuto(Star):
 
     def _remember_official_command_sent(self, key: str, text: str) -> None:
 
-        if not self.seclusion_guard_enabled:
+        if not self._seclusion_guard_settings(key)["enabled"]:
             return
         body = self._official_command_body(key, text)
         if not body:
@@ -1758,15 +2100,16 @@ class XiaoXiuxianAuto(Star):
         self._last_official_command.pop(key, None)
         if not pendings:
             return
-        if self.seclusion_guard_retry_delay_sec > 0:
-            await asyncio.sleep(self.seclusion_guard_retry_delay_sec)
+        retry_delay = self._seclusion_guard_settings(key)["retry_delay_sec"]
+        if retry_delay > 0:
+            await asyncio.sleep(retry_delay)
         for text in pendings:
             await self._enqueue_official_command(key, text)
         logger.info(f"[xiao_xiuxian_auto] {key} 已出关，重放被闭关拦截的任务 {len(pendings)} 条")
 
     async def _send_seclusion_exit(self, key: str, mode: str) -> None:
         attempts = self._seclusion_exit_attempts.get(key, 0)
-        if attempts >= self.seclusion_guard_max_attempts:
+        if attempts >= self._seclusion_guard_settings(key)["max_exit_attempts"]:
             logger.warning(f"[xiao_xiuxian_auto] {key} 闭关出关尝试已达上限，暂停重放任务")
             return
         self._seclusion_exit_attempts[key] = attempts + 1
@@ -1774,7 +2117,7 @@ class XiaoXiuxianAuto(Star):
 
 
         try:
-            await self.cultivate.mark_activity_exit_requested(key)
+            await self._controller("cultivate", key).mark_activity_exit_requested(key)
         except Exception as e:
             logger.warning(f"[xiao_xiuxian_auto] 同步闭关出关状态失败: key={key} err={e}")
         cmd = "宗门出关" if mode == "sect" else "出关"
@@ -1784,11 +2127,12 @@ class XiaoXiuxianAuto(Star):
 
     async def _handle_seclusion_guard_text(self, key: str, text: str) -> bool:
 
-        if not self.seclusion_guard_enabled:
+        settings = self._seclusion_guard_settings(key)
+        if not settings["enabled"]:
             return False
         text = str(text or "")
 
-        block_mode = self._detect_seclusion_block_mode(text)
+        block_mode = self._detect_seclusion_block_mode(key, text)
         if block_mode:
             blocked_cmd = self._last_official_command.get(key)
 
@@ -1797,7 +2141,7 @@ class XiaoXiuxianAuto(Star):
                 self._last_official_command.pop(key, None)
                 return False
             self._queue_seclusion_pending(key, blocked_cmd)
-            mode = "sect" if (block_mode == "sect" and self.seclusion_guard_prefer_sect_exit) else "normal"
+            mode = "sect" if (block_mode == "sect" and settings["prefer_sect_exit"]) else "normal"
             await self._send_seclusion_exit(key, mode)
             return True
 
@@ -1908,7 +2252,7 @@ class XiaoXiuxianAuto(Star):
 
                 if module:
                     try:
-                        await self.cultivate.mark_activity_exit_requested(key)
+                        await self._controller("cultivate", key).mark_activity_exit_requested(key)
                     except Exception as e:
                         logger.warning(f"[xiao_xiuxian_auto] 标记活动征用休息状态失败: key={key} err={e}")
                 await self._raw_send_by_key(key, text)
@@ -2218,8 +2562,8 @@ class XiaoXiuxianAuto(Star):
                     _rounds = 1
                 reply = await self.auto_alchemy.cmd_auto_buy_herbs_start(key, _rounds, send_cb)
             elif text == "关闭购买药材": reply = await self.auto_alchemy.cmd_auto_buy_herbs_stop(key)
-            elif text == "开启动态购买": reply = await self.auto_alchemy.cmd_toggle_dynamic_buy(True)
-            elif text == "关闭动态购买": reply = await self.auto_alchemy.cmd_toggle_dynamic_buy(False)
+            elif text == "开启动态购买": reply = await self._controller("auto_alchemy", key).cmd_toggle_dynamic_buy(True)
+            elif text == "关闭动态购买": reply = await self._controller("auto_alchemy", key).cmd_toggle_dynamic_buy(False)
             elif text == "开启灵界升级": reply = await self.linjie.cmd_enable(key, send_cb)
             elif text == "关闭灵界升级": reply = await self.linjie.cmd_disable(key)
             elif text == "灵界状态": reply = await self.linjie.cmd_status(key)
@@ -2240,19 +2584,19 @@ class XiaoXiuxianAuto(Star):
             elif text.startswith("一键炼金"):
                 reply = await self.inventory_ops.cmd_start_alchemy(key, text.replace("一键炼金", "", 1).strip(), send_cb)
             elif text in ("炼金名单", "炼金白名单", "炼金黑名单"):
-                reply = self.inventory_ops.list_rules()
+                reply = self._controller("inventory_ops", key).list_rules()
             elif text.startswith("添加炼金白名单"):
                 _args = text.replace("添加炼金白名单", "", 1).strip().split()
-                reply = self.inventory_ops.add_whitelist(_args[0] if _args else "丹药", _args[1:] if len(_args) > 1 else [])
+                reply = self._controller("inventory_ops", key).add_whitelist(_args[0] if _args else "丹药", _args[1:] if len(_args) > 1 else [])
             elif text.startswith("删除炼金白名单"):
                 _args = text.replace("删除炼金白名单", "", 1).strip().split()
-                reply = self.inventory_ops.remove_whitelist(_args[0] if _args else "丹药", _args[1:] if len(_args) > 1 else [])
+                reply = self._controller("inventory_ops", key).remove_whitelist(_args[0] if _args else "丹药", _args[1:] if len(_args) > 1 else [])
             elif text.startswith("添加炼金黑名单"):
                 _args = text.replace("添加炼金黑名单", "", 1).strip().split()
-                reply = self.inventory_ops.add_blacklist(_args[0] if _args else "装备", _args[1:] if len(_args) > 1 else [])
+                reply = self._controller("inventory_ops", key).add_blacklist(_args[0] if _args else "装备", _args[1:] if len(_args) > 1 else [])
             elif text.startswith("删除炼金黑名单"):
                 _args = text.replace("删除炼金黑名单", "", 1).strip().split()
-                reply = self.inventory_ops.remove_blacklist(_args[0] if _args else "装备", _args[1:] if len(_args) > 1 else [])
+                reply = self._controller("inventory_ops", key).remove_blacklist(_args[0] if _args else "装备", _args[1:] if len(_args) > 1 else [])
             elif text in ("坊市价格状态", "价格状态", "坊市状态", "价格中心状态", "计算中心状态"):
                 reply = await self.market_price.summary()
             elif text in ("刷新坊市价格", "更新坊市价格", "刷新价格中心", "刷新计算中心"):
@@ -2276,7 +2620,8 @@ class XiaoXiuxianAuto(Star):
             elif text.startswith("设置计算中心密钥"):
                 reply = await self.cmd_set_price_center_key(text.replace("设置计算中心密钥", "", 1).strip())
             elif text in ("任务状态", "修仙状态"): reply = await self.cmd_task_status(key)
-            elif text.startswith("悬赏"): reply = await self.bounty.cmd_set_strategy(key, text.replace("悬赏", "").strip())
+            elif text in ("悬赏修为", "悬赏价值", "悬赏耗时"):
+                reply = await self.bounty.cmd_set_strategy(key, text.replace("悬赏", "", 1).strip())
             elif text.startswith("修仙菜单"):
                 sub_menu = text.replace("修仙菜单", "").strip()
                 reply = await self.cmd_menu(key, sub_menu)
@@ -2431,8 +2776,8 @@ class XiaoXiuxianAuto(Star):
                 _rounds = 1
             reply = await self.auto_alchemy.cmd_auto_buy_herbs_start(key, _rounds, send_cb)
         elif text == "关闭购买药材": reply = await self.auto_alchemy.cmd_auto_buy_herbs_stop(key)
-        elif text == "开启动态购买": reply = await self.auto_alchemy.cmd_toggle_dynamic_buy(True)
-        elif text == "关闭动态购买": reply = await self.auto_alchemy.cmd_toggle_dynamic_buy(False)
+        elif text == "开启动态购买": reply = await self._controller("auto_alchemy", key).cmd_toggle_dynamic_buy(True)
+        elif text == "关闭动态购买": reply = await self._controller("auto_alchemy", key).cmd_toggle_dynamic_buy(False)
         elif text == "开启灵界升级": reply = await self.linjie.cmd_enable(key, send_cb)
         elif text == "关闭灵界升级": reply = await self.linjie.cmd_disable(key)
         elif text == "灵界状态": reply = await self.linjie.cmd_status(key)
@@ -2453,19 +2798,19 @@ class XiaoXiuxianAuto(Star):
         elif text.startswith("一键炼金"):
             reply = await self.inventory_ops.cmd_start_alchemy(key, text.replace("一键炼金", "", 1).strip(), send_cb)
         elif text in ("炼金名单", "炼金白名单", "炼金黑名单"):
-            reply = self.inventory_ops.list_rules()
+            reply = self._controller("inventory_ops", key).list_rules()
         elif text.startswith("添加炼金白名单"):
             _args = text.replace("添加炼金白名单", "", 1).strip().split()
-            reply = self.inventory_ops.add_whitelist(_args[0] if _args else "丹药", _args[1:] if len(_args) > 1 else [])
+            reply = self._controller("inventory_ops", key).add_whitelist(_args[0] if _args else "丹药", _args[1:] if len(_args) > 1 else [])
         elif text.startswith("删除炼金白名单"):
             _args = text.replace("删除炼金白名单", "", 1).strip().split()
-            reply = self.inventory_ops.remove_whitelist(_args[0] if _args else "丹药", _args[1:] if len(_args) > 1 else [])
+            reply = self._controller("inventory_ops", key).remove_whitelist(_args[0] if _args else "丹药", _args[1:] if len(_args) > 1 else [])
         elif text.startswith("添加炼金黑名单"):
             _args = text.replace("添加炼金黑名单", "", 1).strip().split()
-            reply = self.inventory_ops.add_blacklist(_args[0] if _args else "装备", _args[1:] if len(_args) > 1 else [])
+            reply = self._controller("inventory_ops", key).add_blacklist(_args[0] if _args else "装备", _args[1:] if len(_args) > 1 else [])
         elif text.startswith("删除炼金黑名单"):
             _args = text.replace("删除炼金黑名单", "", 1).strip().split()
-            reply = self.inventory_ops.remove_blacklist(_args[0] if _args else "装备", _args[1:] if len(_args) > 1 else [])
+            reply = self._controller("inventory_ops", key).remove_blacklist(_args[0] if _args else "装备", _args[1:] if len(_args) > 1 else [])
         elif text in ("坊市价格状态", "价格状态", "坊市状态", "价格中心状态", "计算中心状态"):
             reply = await self.market_price.summary()
         elif text in ("刷新坊市价格", "更新坊市价格", "刷新价格中心", "刷新计算中心"):
@@ -2487,7 +2832,8 @@ class XiaoXiuxianAuto(Star):
         elif text.startswith("设置计算中心密钥"):
             reply = await self.cmd_set_price_center_key(text.replace("设置计算中心密钥", "", 1).strip())
         elif text in ("任务状态", "修仙状态"): reply = await self.cmd_task_status(key)
-        elif text.startswith("悬赏"): reply = await self.bounty.cmd_set_strategy(key, text.replace("悬赏", "").strip())
+        elif text in ("悬赏修为", "悬赏价值", "悬赏耗时"):
+            reply = await self.bounty.cmd_set_strategy(key, text.replace("悬赏", "", 1).strip())
         elif text.startswith("修仙菜单"):
             sub_menu = text.replace("修仙菜单", "").strip()
             reply = await self.cmd_menu(key, sub_menu)
