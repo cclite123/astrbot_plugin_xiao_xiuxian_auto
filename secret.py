@@ -126,9 +126,9 @@ class SecretController:
         await send_cb(f"@{self.official_qq} 探索秘境")
         next_run = self._next_daily_run_ts(allow_today=False)
         next_dt = datetime.fromtimestamp(next_run, BEIJING_TZ) if BEIJING_TZ else datetime.fromtimestamp(next_run)
-        return (f"✅ 已开启自动秘境\n"
+        return (f"✅ 已开启秘境\n"
                 f"🔎 已立即探测当前秘境状态\n"
-                f"⏰ 若今日已完成，将静默至次日（北京时间）约 {fmt_ts(next_run)} 自动执行\n"
+                f"⏰ 若今日已完成，将静默至次日（北京时间）约 {fmt_ts(next_run)} 执行\n"
                 "🗺️ 进入秘境后会提示具体结算时间。")
 
     async def cmd_disable(self, key: str) -> str:
@@ -139,7 +139,7 @@ class SecretController:
         st.settle_at_ts = 0.0
         st.next_step_ts = 0.0
         await self._set(key, st)
-        return "🛑 已关闭自动秘境"
+        return "🛑 已关闭秘境"
 
     async def _enter_sleep_until_next_day(self, key: str, st: SecretState, send_cb, reason: str = ""):
         st.phase = "SLEEPING"
@@ -149,9 +149,6 @@ class SecretController:
         st.current_area = ""
         st.done_streak = 0
         await self._set(key, st)
-        if send_cb:
-            await send_cb(f"💤 今日秘境已完成{('（' + reason + '）') if reason else ''}，"
-                          f"下次自动秘境时间约：{fmt_ts(st.wake_at_ts)}")
 
 
     async def on_official_text(self, key: str, text: str, send_cb) -> None:
@@ -166,7 +163,6 @@ class SecretController:
                 self._info(f"[secret] {key} 检测到正在秘境中（分身乏术），发送秘境结算查询剩余时间")
                 st.last_action_ts = time.time()
                 await self._set(key, st)
-                await send_cb("🗺️ 检测到当前正在秘境中，正在查询剩余时间。")
                 await send_cb(f"@{self.official_qq} 秘境结算")
             return
 
@@ -253,7 +249,6 @@ class SecretController:
                 st.done_streak = 0
                 await self._set(key, st)
                 self._info(f"[secret] {key} 触发每日秘境流程")
-                await send_cb("⏰ 已到自动秘境执行时间，正在探索秘境。")
                 await send_cb(f"@{self.official_qq} 探索秘境")
             return
 
@@ -270,7 +265,6 @@ class SecretController:
             st.done_streak = 0
             st.last_action_ts = now
             await self._set(key, st)
-            await send_cb("⏰ 已到秘境预计结算时间，正在发送秘境结算。")
             await send_cb(f"@{self.official_qq} 秘境结算")
             return
 
@@ -290,7 +284,6 @@ class SecretController:
                 st.phase = "PROBING"
                 st.last_action_ts = now
                 await self._set(key, st)
-                await send_cb("⚠️ 秘境验证超时，正在重新探测秘境状态。")
                 await send_cb(f"@{self.official_qq} 探索秘境")
             return
 

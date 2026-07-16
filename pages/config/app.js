@@ -236,7 +236,7 @@ function renderHerbTab() {
     const prices = (data && data.prices) || {};
     formEl.innerHTML = `
       <div class="section-title">🌿 药材购买上限价</div>
-      <div class="section-hint">自动炼丹购买每种药材时的最高可接受价格（单位：万灵石）。超过此价的药材不会自动购买。保存后下次购买即生效。</div>
+      <div class="section-hint">炼丹购买每种药材时的最高可接受价格（单位：万灵石）。超过此价的药材不会购买。保存后下次购买即生效。</div>
       <div id="herb-list"></div>
       <div class="toolbar-row">
         <button id="add-herb-btn">+ 添加药材</button>

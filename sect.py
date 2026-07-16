@@ -146,7 +146,7 @@ class SectController:
         st.next_action_ts = time.time() + self.response_timeout_sec
         await self._set(key, st)
         await send_cb(f"@{self.official_qq} 宗门任务接取")
-        return ("✅ 已开启自动宗门任务，已加入互斥玩法队列。\n"
+        return ("✅ 已开启宗门任务。\n"
                 "📌 会在悬赏/秘境空闲后执行今日任务。\n"
                 f"⏰ 若小小暂无有效回执，将于 {fmt_ts(st.next_action_ts)} 兜底重试。")
 
@@ -155,7 +155,7 @@ class SectController:
         st.enabled = False
         st.phase = "IDLE"
         await self._set(key, st)
-        return "🛑 已关闭自动宗门任务。"
+        return "🛑 已关闭宗门任务。"
 
     async def cmd_set_time(self, key: str, time_str: str) -> str:
         m = re.match(r"(\d{1,2})[.:：](\d{1,2})", time_str)
@@ -167,7 +167,7 @@ class SectController:
                 st.daily_minute = m_min
                 await self._set(key, st)
                 next_ts = self._next_daily_ts(h, m_min)
-                return f"✅ 自动宗门任务执行时间已设置为每日 {h:02d}:{m_min:02d} (北京时间)\n⏰ 下次自动宗门任务时间约：{fmt_ts(next_ts)}"
+                return f"✅ 宗门任务执行时间已设置为每日 {h:02d}:{m_min:02d} (北京时间)\n⏰ 下次宗门任务时间约：{fmt_ts(next_ts)}"
         return "❌ 格式错误，请使用如 18.00 或 07.30 的格式"
 
     async def cmd_status(self, key: str) -> str:
@@ -206,7 +206,7 @@ class SectController:
         await self._set(key, st)
         self._info(f"[sect] {key} 气血不足，暂停宗门任务，进入休养")
         recover_hint_ts = time.time() + self.hp_recovery_min_sec
-        await send_cb(f"⚠️ 卡比提醒：气血不足，宗门任务已暂停，正在自动回血；预计最早 {fmt_ts(recover_hint_ts)} 后继续。")
+        await send_cb(f"⚠️ 卡比提醒：气血不足，宗门任务已暂停，正在回血；预计最早 {fmt_ts(recover_hint_ts)} 后继续。")
 
 
         if self.cultivate_ref is not None:
@@ -258,7 +258,6 @@ class SectController:
             st.wake_at_ts = self._next_daily_ts(st.daily_hour, st.daily_minute)
             st.next_action_ts = 0.0
             await self._set(key, st)
-            await send_cb(f"💤 今日宗门任务已达上限，下次宗门任务时间约：{fmt_ts(st.wake_at_ts)}")
 
 
             if self.cultivate_ref is not None:
@@ -280,7 +279,6 @@ class SectController:
             st.next_action_ts = time.time() + self.response_timeout_sec
             await self._set(key, st)
             self._info(f"[sect] {key} 宗门任务完成，继续接取下一轮")
-            await send_cb("✅ 宗门任务完成，正在继续接取下一轮。")
             await send_cb(f"@{self.official_qq} 宗门任务接取")
             return
 
@@ -298,7 +296,6 @@ class SectController:
                 st.next_action_ts = time.time() + self.response_timeout_sec
                 await self._set(key, st)
                 self._info(f"[sect] {key} 命中目标「{found_task}」，正在完成")
-                await send_cb(f"✅ 宗门任务已接取：{TASK_MAP.get(found_task, found_task)}，正在立即完成；若 2 分钟内未收到回执将自动重试。")
                 await send_cb(f"@{self.official_qq} 宗门任务完成")
             else:
 
@@ -306,7 +303,6 @@ class SectController:
                 st.next_action_ts = time.time() + self.task_refresh_delay_sec
                 await self._set(key, st)
                 self._info(f"[sect] {key} 任务「{found_task}」未开启，70s后刷新")
-                await send_cb(f"🔄 宗门任务「{TASK_MAP.get(found_task, found_task)}」不在目标列表，预计 {fmt_ts(st.next_action_ts)} 刷新。")
             return
 
 
@@ -328,7 +324,6 @@ class SectController:
                     st.next_action_ts = now + 120
                     await self._set(key, st)
                     self._info(f"[sect] {key} 气血已恢复，继续宗门任务")
-                    await send_cb("💪 气血已恢复，2 秒后继续宗门任务接取。")
 
                     if self.cultivate_ref is not None:
                         try:
@@ -350,7 +345,7 @@ class SectController:
                 st.next_action_ts = now + self.response_timeout_sec
                 updated = True
                 self._info(f"[sect] {key} 到达预定时间，开启今日宗门任务")
-                await send_cb("⏰ 已到自动宗门任务时间，正在接取宗门任务。")
+                await send_cb("⏰ 已到宗门任务时间，正在接取宗门任务。")
                 await send_cb(f"@{self.official_qq} 宗门任务接取")
 
         elif st.phase == "WAITING_REFRESH":
@@ -358,7 +353,6 @@ class SectController:
                 st.phase = "REFRESHING"
                 st.next_action_ts = now + self.response_timeout_sec
                 updated = True
-                await send_cb("🔄 已到宗门任务刷新时间，正在刷新。")
                 await send_cb(f"@{self.official_qq} 宗门任务刷新")
 
 
@@ -367,7 +361,6 @@ class SectController:
                 st.phase = "PROBING"
                 st.next_action_ts = now + self.response_timeout_sec
                 updated = True
-                await send_cb("⚠️ 宗门任务 2 分钟无有效回执，正在重新接取。")
                 await send_cb(f"@{self.official_qq} 宗门任务接取")
 
         if updated:

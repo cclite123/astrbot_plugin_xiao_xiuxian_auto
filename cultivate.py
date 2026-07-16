@@ -53,6 +53,7 @@ class CultivateState:
     is_resting: bool = False
     hp_percent: float = 100.0
     hp_check_ts: float = 0.0
+    hp_check_pending: bool = False
     suspended_for_activity: bool = False
     last_action_ts: float = 0.0
 
@@ -127,9 +128,9 @@ class CultivateController:
 
 
         await self._enter_rest(key, send_cb, force=True)
-        return (f"✅ 已开启自动{mode}（活动完成后会自动回到{mode}状态）\n"
+        return (f"✅ 已开启{mode}（活动完成后会回到{mode}状态）\n"
                 f"🧘 已立即发送「{mode}」相关指令；该功能没有固定结算时间，以小小回复为准。\n"
-                "📊 可发送「自动状态」查看当前修炼/闭关状态。")
+                "📊 可发送「任务状态」查看当前修炼/闭关状态。")
 
     async def cmd_disable(self, key: str, mode: str, send_cb) -> str:
         st = await self._get(key)
@@ -143,11 +144,11 @@ class CultivateController:
         st.suspended_for_activity = False
         await self._set(key, st)
         self.pop_pending(key)
-        return f"🛑 已关闭自动{mode}，后续不再自动恢复该状态。"
+        return f"🛑 已关闭{mode}，后续不再恢复该状态。"
 
     async def cmd_check_hp(self, key: str, send_cb) -> str:
         await send_cb(f"@{self.official_qq} 我的状态")
-        return "🔎 已发起气血查询，收到小小状态回复后会更新「自动状态」中的气血信息。"
+        return "🔎 已发起气血查询，收到小小状态回复后会更新「任务状态」中的气血信息。"
 
 
     async def _send_enter(self, mode: str, send_cb):
@@ -199,8 +200,9 @@ class CultivateController:
 
 
         if st.is_resting:
+            if st.suspended_for_activity:
+                return False
             await self._send_exit(st.mode, send_cb)
-            st.is_resting = False
             st.suspended_for_activity = True
             st.last_action_ts = time.time()
             st.hp_check_ts = 0.0
@@ -232,7 +234,8 @@ class CultivateController:
         st = await self._get(key)
         if not st.mode:
             return
-        st.is_resting = False
+        if st.mode not in (MODE_SECLUSION, MODE_SECT_SECLUSION):
+            st.is_resting = False
         st.suspended_for_activity = True
         st.last_action_ts = time.time()
         if st.mode in (MODE_SECLUSION, MODE_SECT_SECLUSION):
@@ -253,22 +256,32 @@ class CultivateController:
         now = time.time()
 
         if st.mode in (MODE_SECLUSION, MODE_SECT_SECLUSION) and st.is_resting:
-            await self._send_exit(st.mode, send_cb)
-            st.is_resting = False
-            st.suspended_for_activity = True
             duration = now - st.last_action_ts if st.last_action_ts else 9999
-            st.last_action_ts = now
             if duration > self.REST_FULL_WAIT_SEC:
                 st.hp_percent = 100.0
                 st.hp_check_ts = now
+            if st.suspended_for_activity or st.hp_percent < min_pct:
+                await self._set(key, st)
+                return False
+            await self._send_exit(st.mode, send_cb)
+            st.suspended_for_activity = True
+            st.last_action_ts = now
+            st.hp_check_ts = 0.0
             await self._set(key, st)
             return False
 
         if now - st.hp_check_ts > self.HP_FRESH_SEC:
             await send_cb(f"@{self.official_qq} 我的状态")
             st.hp_check_ts = now
+            st.hp_check_pending = True
             await self._set(key, st)
             return False
+
+        if st.hp_check_pending:
+            return False
+
+        if not st.mode:
+            return True
 
         if st.hp_percent >= min_pct:
             return True
@@ -286,8 +299,20 @@ class CultivateController:
         if hp is not None:
             st.hp_percent = hp
             st.hp_check_ts = time.time()
+            st.hp_check_pending = False
             await self._set(key, st)
             self._info(f"[cultivate] {key} 气血更新：{hp:.1f}%")
+
+            if hp < 80.0 and self._pending_after_exit.get(key) and not st.mode:
+                pendings = self.pop_pending(key)
+                for t in pendings:
+                    await asyncio.sleep(1.0)
+                    await send_cb(t)
+                return
+
+            if hp < 80.0 and self._pending_after_exit.get(key) and st.mode and not st.is_resting:
+                await self._enter_rest(key, send_cb)
+                return
 
 
             if hp >= 80.0:

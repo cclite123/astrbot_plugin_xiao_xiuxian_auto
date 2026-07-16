@@ -46,7 +46,7 @@
     "_comment_hp_recovery_cultivate_count": "在修炼模式下，收到多少次修炼回执后视为气血已恢复。",
     "hp_recovery_cultivate_count": 3
   },
-  "_comment_coordinator": "任务协调器配置；控制多个自动任务之间的发送间隔和执行顺序。",
+  "_comment_coordinator": "任务协调器配置；控制多个任务之间的发送间隔和执行顺序。",
   "coordinator": {
     "command_delay_sec": 2.0,
     "activity_order": [
@@ -55,7 +55,7 @@
       "宗门任务"
     ]
   },
-  "_comment_send_fail_policy": "发送失败处理策略；用于永久发送失败时自动拉黑或解绑。",
+  "_comment_send_fail_policy": "发送失败处理策略；用于永久发送失败时拉黑或解绑。",
   "send_fail_policy": {
     "auto_block_permanent_send_error": true,
     "auto_unbind_on_permanent_send_error": true
@@ -67,7 +67,7 @@
     "retry_delay_sec": 1.5,
     "max_exit_attempts": 2
   },
-  "_comment_market_price": "坊市价格模块配置；原有一键上架/价格缓存使用，不参与自动炼丹的实时成本快照规则。",
+  "_comment_market_price": "坊市价格模块配置；原有一键上架/价格缓存使用，不参与炼丹的实时成本快照规则。",
   "market_price": {
     "enabled": true,
     "source": "hybrid",
@@ -96,14 +96,14 @@
     },
     "market_command_price_format": "lingshi"
   },
-  "_comment_auto_alchemy": "自动炼丹模块配置；下面每个字段都有 _comment_ 说明，直接保留在 config.json 中也不会影响读取。",
+  "_comment_auto_alchemy": "炼丹模块配置；下面每个字段都有 _comment_ 说明，直接保留在 config.json 中也不会影响读取。",
   "auto_alchemy": {
-    "_comment": "自动炼丹模块配置；支持批量炼丹、指定丹药炼丹、背包炼丹、暂停/继续/关闭、多轮购买等。",
-    "_comment_enabled": "自动炼丹总开关；false 时自动炼丹相关指令不执行。",
+    "_comment": "炼丹模块配置；支持批量炼丹、指定丹药炼丹、背包炼丹、暂停/继续/关闭、多轮购买等。",
+    "_comment_enabled": "炼丹总开关；false 时炼丹相关指令不执行。",
     "enabled": true,
     "_comment_market_pages": "坊市药材总页数；当前固定为 1-8 页。",
     "market_pages": 8,
-    "_comment_send_interval_sec": "自动炼丹模块发送普通指令的基础间隔秒数。",
+    "_comment_send_interval_sec": "炼丹模块发送普通指令的基础间隔秒数。",
     "send_interval_sec": 1.2,
     "_comment_page_timeout_sec": "等待坊市/背包分页回执的超时时间秒数。",
     "page_timeout_sec": 30.0,
@@ -111,7 +111,7 @@
     "max_page_retries": 1,
     "_comment_default_yield_count": "默认成丹数量；当前按 6 颗计算利润。",
     "default_yield_count": 6,
-    "_comment_batch_buy_enabled": "开启自动炼丹后是否执行购买流程；false 时只计算/展示。",
+    "_comment_batch_buy_enabled": "开启炼丹后是否执行购买流程；false 时只计算/展示。",
     "batch_buy_enabled": true,
     "_comment_batch_buy_send_interval_sec": "批量购买时两次购买指令之间的发送间隔秒数。",
     "batch_buy_send_interval_sec": 1.2,
@@ -119,17 +119,17 @@
     "batch_buy_result_timeout_sec": 180.0,
     "_comment_max_profitable_report_count": "计算结果中最多展示的盈利丹方数量。",
     "max_profitable_report_count": 30,
-    "_comment_purchase_response_timeout_sec": "购买指令发出后等待有效购买回执的时间；30 秒无有效回执则自动结束验证码空窗期，跳过当前购买并继续后续流程。",
+    "_comment_purchase_response_timeout_sec": "购买指令发出后等待有效购买回执的时间；30 秒无有效回执则结束验证码空窗期，跳过当前购买并继续后续流程。",
     "purchase_response_timeout_sec": 30.0,
-    "_comment_captcha_wait_sec": "疑似验证码等待窗口秒数；当前与 purchase_response_timeout_sec 保持 30 秒，超时后自动恢复继续。",
+    "_comment_captcha_wait_sec": "疑似验证码等待窗口秒数；当前与 purchase_response_timeout_sec 保持 30 秒，超时后恢复继续。",
     "captcha_wait_sec": 30.0,
-    "_comment_busy_retry_delay_sec": "官方回执包含“方式现在太繁忙了/坊市现在太繁忙了/现在太繁忙”时，不判定购买失败，自动等待该秒数后重试当前购买指令。",
+    "_comment_busy_retry_delay_sec": "官方回执包含“方式现在太繁忙了/坊市现在太繁忙了/现在太繁忙”时，不判定购买失败，等待该秒数后重试当前购买指令。",
     "busy_retry_delay_sec": 15.0,
     "_comment_alchemy_confirm_timeout_sec": "炼丹指令发出后等待“恭喜道友成功炼成丹药”的超时时间秒数。",
     "alchemy_confirm_timeout_sec": 20.0,
     "_comment_alchemy_send_interval_sec": "两次炼丹指令之间的发送间隔秒数。",
     "alchemy_send_interval_sec": 1.2,
-    "_comment_min_profit_6pill": "6 丹利润最低阈值，单位为万；低于该值不纳入自动炼丹。",
+    "_comment_min_profit_6pill": "6 丹利润最低阈值，单位为万；低于该值不纳入炼丹。",
     "min_profit_6pill": 130,
     "_comment_page_index_cache_enabled": "是否启用药材页码索引缓存；页码稳定时可减少每次全量查 1-8 页。",
     "page_index_cache_enabled": true,
@@ -141,9 +141,9 @@
     "target_mode_plan_lock": false,
     "_comment_batch_repeat_until_threshold": "批量模式是否允许同一丹药匹配多条盈利丹方，直到低于利润阈值。",
     "batch_repeat_until_threshold": true,
-    "_comment_max_batch_formula_count": "开启自动炼丹批量模式最多选择多少条主丹方；历史字段名保留。8 表示本轮最多锁定 8 条主丹方。",
+    "_comment_max_batch_formula_count": "开启炼丹批量模式最多选择多少条主丹方；历史字段名保留。8 表示本轮最多锁定 8 条主丹方。",
     "max_batch_formula_count": 6,
-    "_comment_max_formula_per_pill": "开启自动炼丹批量模式下，每条主丹方炼制多少炉；最小按 1 处理，不支持 0 表示不限。总炉数约为 max_batch_formula_count × max_formula_per_pill。",
+    "_comment_max_formula_per_pill": "开启炼丹批量模式下，每条主丹方炼制多少炉；最小按 1 处理，不支持 0 表示不限。总炉数约为 max_batch_formula_count × max_formula_per_pill。",
     "max_formula_per_pill": 6,
     "_comment_batch_fast_start_from_snapshot": "批量模式是否允许使用上次价格快照快速启动，避免每次固定查 8 页。",
     "batch_fast_start_from_snapshot": true,
@@ -159,7 +159,7 @@
     "refresh_pages_each_buy_round": true,
     "_comment_target_unknown_price_execute": "指定丹药如果没有固定炼金售价，是否允许按最低成本丹方执行，不做利润判断。",
     "target_unknown_price_execute": true,
-    "_comment_backpack_max_formula_count": "开启自动背包炼丹最多选择多少个可盈利丹方；背包模式不强求最高利润，优先匹配已有药材。",
+    "_comment_backpack_max_formula_count": "开启背包炼丹最多选择多少个可盈利丹方；背包模式不强求最高利润，优先匹配已有药材。",
     "backpack_max_formula_count": 10,
     "_comment_backpack_use_existing_as_free": "背包炼丹时是否用背包已有药材抵扣实际采购数量；利润成本仍按药材实时坊市价格计算。",
     "backpack_use_existing_as_free": true,
@@ -171,12 +171,12 @@
     "dynamic_herb_buy_during_market_scan": false,
     "_comment_batch_mode_profit_threshold": "批量模式下丹方利润阈值，单位万灵石；低于该值的丹方不纳入批量炼丹。默认 50。",
     "batch_mode_profit_threshold": 50,
-    "_comment_use_backpack_for_batch_mode": "批量模式是否使用背包药材抵扣采购需求；true 时背包已有药材自动抵扣缺口，只购买不足部分。",
+    "_comment_use_backpack_for_batch_mode": "批量模式是否使用背包药材抵扣采购需求；true 时背包已有药材抵扣缺口，只购买不足部分。",
     "use_backpack_for_batch_mode": true
   },
-  "_comment_linjie_upgrade": "自动灵界升级模块；启动后先查询当前灵界数据，之后按成功回执更新缓存并按 ROI 自动升级。",
+  "_comment_linjie_upgrade": "灵界升级模块；启动后先查询当前灵界数据，之后按成功回执更新缓存并按 ROI 升级。",
   "linjie_upgrade": {
-    "_comment_enabled": "自动灵界升级总开关；false 时相关指令仅提示关闭。",
+    "_comment_enabled": "灵界升级总开关；false 时相关指令仅提示关闭。",
     "enabled": true,
     "_comment_reserve_lingkuang": "最低保留灵矿石数量；0 表示不保留。",
     "reserve_lingkuang": 0,
@@ -186,7 +186,7 @@
     "query_timeout_sec": 20.0,
     "_comment_action_timeout_sec": "发出升级指令后等待成功/失败回执的超时时间。",
     "action_timeout_sec": 25.0,
-    "_comment_max_failures": "连续失败多少次后自动停止。",
+    "_comment_max_failures": "连续失败多少次后停止。",
     "max_failures": 3,
     "_comment_cache_ttl_sec": "灵界缓存有效期；有效期内灵界规划优先使用缓存，避免频繁查询。",
     "cache_ttl_sec": 21600,
@@ -203,11 +203,11 @@
     "_comment_max_sim_steps": "多步滚动 ROI 模拟最大步数；默认15步，用于「灵界规划序列」和「灵界规划详情」。",
     "max_sim_steps": 15
   },
-  "_comment_endless_tower": "自动无尽妖塔模块；支持限定挑战次数、真元检测和真元不足时宗门闭关恢复。",
+  "_comment_endless_tower": "无尽妖塔模块；支持限定挑战次数、真元检测和真元不足时宗门闭关恢复。",
   "endless_tower": {
-    "_comment_enabled": "自动无尽妖塔总开关；false 时相关指令仅提示关闭。",
+    "_comment_enabled": "无尽妖塔总开关；false 时相关指令仅提示关闭。",
     "enabled": true,
-    "_comment_mp_check_enabled": "默认是否开启真元检测；可通过指令 开启/关闭无尽真元检测 调整。",
+    "_comment_mp_check_enabled": "默认是否开启真元检测；可通过指令 开启/关闭真元检测 调整。",
     "mp_check_enabled": true,
     "_comment_mp_threshold": "真元检测阈值，范围 0-9999；低于该百分比时先宗门闭关恢复。",
     "mp_threshold": 600,
@@ -219,7 +219,7 @@
     "status_timeout_sec": 20.0,
     "_comment_challenge_timeout_sec": "发送 挑战无尽妖塔 后等待回执的超时时间。",
     "challenge_timeout_sec": 60.0,
-    "_comment_max_failures": "连续超时或解析失败多少次后自动停止。",
+    "_comment_max_failures": "连续超时或解析失败多少次后停止。",
     "max_failures": 3
   }
 }

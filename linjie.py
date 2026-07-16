@@ -314,7 +314,7 @@ class LinjieUpgradeController:
 
     async def cmd_enable(self, key: str, send_cb) -> str:
         if not self.module_enabled:
-            return "🛑 自动灵界升级模块已在配置中关闭。"
+            return "🛑 灵界升级模块已在配置中关闭。"
         st = await self._get(key)
         st.enabled = True
         st.failure_count = 0
@@ -324,10 +324,10 @@ class LinjieUpgradeController:
             st.next_action_ts = time.time() + self.success_delay_sec
             st.after_query = ""
             await self._set(key, st)
-            return "✅ 已开启自动灵界升级，将使用当前缓存按 ROI 执行。"
+            return "✅ 已开启灵界升级，将使用当前缓存按 ROI 执行。"
         self._start_query(st, "RUN")
         await self._set(key, st)
-        return "✅ 已开启自动灵界升级，正在查询灵界信息并建立缓存。"
+        return "✅ 已开启灵界升级，正在查询灵界信息并建立缓存。"
 
     async def cmd_disable(self, key: str) -> str:
         st = await self._get(key)
@@ -339,7 +339,7 @@ class LinjieUpgradeController:
         st.awaiting_query = ""
         st.after_query = ""
         await self._set(key, st)
-        return "🛑 已关闭自动灵界升级。"
+        return "🛑 已关闭灵界升级。"
 
     async def cmd_status(self, key: str) -> str:
         st = await self._get(key)
@@ -348,7 +348,7 @@ class LinjieUpgradeController:
         plan = self._best_affordable_or_waiting(st)
         plan_text = self._format_candidate_line(plan[0], st, plan[1]) if plan[0] else "暂无可用规划"
         return (
-            "📊【自动灵界升级状态】\n"
+            "📊【灵界升级状态】\n"
             f"状态：{status} / {next_text}\n"
             f"灵矿石：{format_money(st.balance)}\n"
             f"秒产估算：{format_speed(st.total_speed)}\n"
@@ -530,7 +530,7 @@ class LinjieUpgradeController:
             st.next_action_ts = 0.0
             await self._set(key, st)
             if send_cb:
-                await send_cb("ℹ️ 自动灵界升级：当前没有可执行候选。")
+                await send_cb("ℹ️ 灵界升级：当前没有可执行候选。")
             return
 
         if not affordable:
@@ -542,7 +542,7 @@ class LinjieUpgradeController:
             await self._set(key, st)
             if send_cb:
                 await send_cb(
-                    "💤 自动灵界升级：灵矿石不足，暂时等待。\n"
+                    "💤 灵界升级：灵矿石不足，暂时等待。\n"
                     f"下一目标：{cand.note}\n"
                     f"需要：{format_money(cand.cost)}，当前：{format_money(st.balance)}，还差：{format_money(cand.cost - st.balance)}\n"
                     f"预计：{format_duration(wait_sec)}后，约 {fmt_ts(st.wake_at_ts)} 再查询确认。"
@@ -1356,7 +1356,7 @@ class LinjieUpgradeController:
             self._format_candidate_line(cand, st, affordable),
         ]
         if affordable:
-            lines.append("预计发送：当前灵矿石足够，开启自动灵界升级后会立即执行。")
+            lines.append("预计发送：当前灵矿石足够，开启灵界升级后会立即执行。")
         else:
             wait_sec = self._estimate_wait_seconds(st, cand.cost)
             lines.append(f"还差：{format_money(cand.cost - st.balance)}，预计 {format_duration(wait_sec)}")
@@ -1487,4 +1487,4 @@ class LinjieUpgradeController:
         st.pending_action = {}
         await self._set(key, st)
         if send_cb:
-            await send_cb(f"🛑 自动灵界升级已停止：{reason}，连续失败 {st.failure_count}/{self.max_failures}。")
+            await send_cb(f"🛑 灵界升级已停止：{reason}，连续失败 {st.failure_count}/{self.max_failures}。")

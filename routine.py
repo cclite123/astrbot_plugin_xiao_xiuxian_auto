@@ -164,16 +164,16 @@ class RoutineController:
         st.sign_phase = "WORKING"
         st.sign_action_ts = time.time() + 2
         await self._set(key, st)
-        return ("✅ 已开启自动签到\n"
+        return ("✅ 已开启签到\n"
                 f"⏰ 首次签到时间：约 {fmt_ts(st.sign_action_ts)}\n"
-                "📅 后续每日 07:05 (±3分钟) 自动签到，完成后会提示下一次时间。")
+                "📅 后续每日 07:05 (±3分钟) 签到，完成后会提示下一次时间。")
 
     async def cmd_disable_signin(self, key: str) -> str:
         st = await self._get(key)
         st.signin_enabled = False
         st.sign_phase = "IDLE"
         await self._set(key, st)
-        return "🛑 已关闭自动签到"
+        return "🛑 已关闭签到"
 
 
 
@@ -185,9 +185,9 @@ class RoutineController:
         st.pill_action_ts = time.time() + 2
         st.pill_fail_count = 0
         await self._set(key, st)
-        return ("✅ 已开启自动领丹\n"
+        return ("✅ 已开启领丹\n"
                 f"⏰ 首次领丹时间：约 {fmt_ts(st.pill_action_ts)}\n"
-                "📅 后续每日 07:10 (±3分钟) 自动领丹，完成后会提示下一次时间。")
+                "📅 后续每日 07:10 (±3分钟) 领丹，完成后会提示下一次时间。")
 
     async def cmd_disable_pill(self, key: str) -> str:
         st = await self._get(key)
@@ -195,7 +195,7 @@ class RoutineController:
         st.pill_phase = "IDLE"
         st.pill_fail_count = 0
         await self._set(key, st)
-        return "🛑 已关闭自动领丹"
+        return "🛑 已关闭领丹"
 
 
 
@@ -206,7 +206,7 @@ class RoutineController:
         st.mine_phase = "WORKING"
         st.mine_action_ts = time.time() + 2
         await self._set(key, st)
-        return ("✅ 已开启自动挖灵石\n"
+        return ("✅ 已开启挖灵石\n"
                 f"⏰ 首次挖灵石时间：约 {fmt_ts(st.mine_action_ts)}\n"
                 "⛏️ 发送一次后会立即进入约 5 小时静默，防止重复刷屏；下次时间会单独提示。")
 
@@ -215,7 +215,7 @@ class RoutineController:
         st.mine_enabled = False
         st.mine_phase = "IDLE"
         await self._set(key, st)
-        return "🛑 已关闭自动挖矿"
+        return "🛑 已关闭挖矿"
 
 
 
@@ -227,9 +227,9 @@ class RoutineController:
         st.farm_action_ts = time.time() + 2
         st.farm_query_fail_count = 0
         await self._set(key, st)
-        return ("✅ 已开启自动灵田结算\n"
+        return ("✅ 已开启灵田结算\n"
                 f"⏰ 首次灵田结算时间：约 {fmt_ts(st.farm_action_ts)}\n"
-                "🌾 采集成功后会自动再发一次「灵田结算」查询下次收成时间，\n"
+                "🌾 采集成功后会再发一次「灵田结算」查询下次收成时间，\n"
                 "并在官方时间 +1 分钟 后再次执行。")
 
     async def cmd_disable_farm(self, key: str) -> str:
@@ -240,7 +240,7 @@ class RoutineController:
         st.farm_action_ts = 0.0
         st.farm_query_fail_count = 0
         await self._set(key, st)
-        return "🛑 已关闭自动灵田结算"
+        return "🛑 已关闭灵田结算"
 
 
 
@@ -254,15 +254,11 @@ class RoutineController:
             if RE_SIGN_OK.search(text):
                 st.sign_action_ts = time.time() + 10
                 self._info(f"[routine] {key} 签到成功，10s后重发")
-                if send_cb:
-                    await send_cb("✅ 签到成功，10 秒后再次确认签到状态。")
                 updated = True
             elif RE_SIGN_DONE.search(text):
                 st.sign_phase = "SLEEPING"
                 st.sign_wake_ts = self._next_daily_ts(7, 5, allow_today=False)
                 self._info(f"[routine] {key} 签到完成，静默至次日")
-                if send_cb:
-                    await send_cb(f"📅 签到流程完成，下次签到时间约：{fmt_ts(st.sign_wake_ts)}")
                 updated = True
 
 
@@ -271,16 +267,12 @@ class RoutineController:
                 st.pill_fail_count = 0
                 st.pill_action_ts = time.time() + 10
                 self._info(f"[routine] {key} 领丹成功，10s后重发")
-                if send_cb:
-                    await send_cb("✅ 领丹成功，10 秒后再次确认领取状态。")
                 updated = True
             elif RE_PILL_DONE.search(text):
                 st.pill_fail_count = 0
                 st.pill_phase = "SLEEPING"
                 st.pill_wake_ts = self._next_daily_ts(7, 10, allow_today=False)
                 self._info(f"[routine] {key} 领丹完成，静默至次日")
-                if send_cb:
-                    await send_cb(f"📅 领丹流程完成，下次领丹时间约：{fmt_ts(st.pill_wake_ts)}")
                 updated = True
 
 
@@ -292,8 +284,6 @@ class RoutineController:
                 st.mine_wake_ts = self._next_mine_ts()
                 st.mine_action_ts = 0.0
                 self._info(f"[routine] {key} 挖矿已触发/完成，静默约 5 小时")
-                if send_cb:
-                    await send_cb(f"⛏️ 小小已确认挖灵石开始，下次挖灵石时间约：{fmt_ts(st.mine_wake_ts)}")
                 updated = True
 
 
@@ -328,8 +318,6 @@ class RoutineController:
                     f"[routine] {key} 灵田采集成功，{FARM_QUERY_DELAY_SEC}s 后再次"
                     f"发送「灵田结算」以查询下次收成时间"
                 )
-                if send_cb:
-                    await send_cb(f"🌾 灵田已收取，{FARM_QUERY_DELAY_SEC} 秒后查询下次收成时间。")
                 updated = True
 
 
@@ -397,7 +385,6 @@ class RoutineController:
                     await self._set(key, st)
                     updated = False
                 await send_cb(f"@{self.official_qq} 修仙签到")
-                await send_cb("📌 已发送修仙签到，完成后会提示下次签到时间。")
 
 
         if st.pill_enabled:
@@ -426,7 +413,6 @@ class RoutineController:
                         await self._set(key, st)
                         updated = False
                     await send_cb(f"@{self.official_qq} 宗门丹药领取")
-                    await send_cb("📌 已发送宗门丹药领取，完成后会提示下次领丹时间。")
 
 
         if st.mine_enabled:
@@ -448,7 +434,6 @@ class RoutineController:
                     await self._set(key, st)
                     updated = False
                 await send_cb(f"@{self.official_qq} 挖灵石")
-                await send_cb(f"⛏️ 已发送挖灵石，下次挖灵石时间约：{fmt_ts(st.mine_wake_ts)}")
                 self._info(f"[routine] {key} 已发送一次挖灵石，进入约 5 小时静默，避免重复刷屏")
 
 
@@ -468,7 +453,6 @@ class RoutineController:
                     await self._set(key, st)
                     updated = False
                 await send_cb(f"@{self.official_qq} 灵田结算")
-                await send_cb("🌾 已发送灵田结算，若收取成功会继续提示下次收取时间。")
 
 
             elif st.farm_phase == "QUERYING" and now >= st.farm_action_ts:
@@ -479,7 +463,6 @@ class RoutineController:
                     await self._set(key, st)
                     updated = False
                 await send_cb(f"@{self.official_qq} 灵田结算")
-                await send_cb("🌾 已发送灵田时间查询，解析成功后会提示下次收取时间。")
 
         if updated:
             await self._set(key, st)

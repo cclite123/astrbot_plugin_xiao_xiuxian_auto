@@ -282,9 +282,9 @@ class BountyController:
 
         next_run = self._next_daily_run_ts(allow_today=False)
         next_dt = datetime.fromtimestamp(next_run, BEIJING_TZ) if BEIJING_TZ else datetime.fromtimestamp(next_run)
-        return (f"✅ 已开启自动悬赏（策略：{st.strategy or self.default_strategy}）\n"
+        return (f"✅ 已开启悬赏（策略：{st.strategy or self.default_strategy}）\n"
                 f"🔎 已立即探测当前悬赏状态\n"
-                f"⏰ 若今日已完成，将静默至次日（北京时间）约 {fmt_ts(next_run)} 自动执行\n"
+                f"⏰ 若今日已完成，将静默至次日（北京时间）约 {fmt_ts(next_run)} 执行\n"
                 "🎯 接取成功后会提示具体结算时间。")
 
     async def cmd_disable(self, key: str) -> str:
@@ -294,7 +294,7 @@ class BountyController:
         st.wake_at_ts = 0.0
         st.settle_at_ts = 0.0
         await self._set(key, st)
-        return "🛑 已关闭自动悬赏"
+        return "🛑 已关闭悬赏"
 
     async def cmd_set_strategy(self, key: str, strategy: str) -> str:
         if strategy not in ("修为", "价值", "耗时"):
@@ -320,9 +320,6 @@ class BountyController:
         st.settle_at_ts = 0.0
         st.current_title = ""
         await self._set(key, st)
-        if send_cb:
-            await send_cb(f"💤 今日悬赏已完成{('（' + reason + '）') if reason else ''}，"
-                          f"下次自动悬赏时间约：{fmt_ts(st.wake_at_ts)}")
 
 
     async def on_official_text(self, key: str, text: str, send_cb) -> None:
@@ -345,7 +342,6 @@ class BountyController:
             st.phase = "REFRESHING"
             st.last_action_ts = time.time()
             await self._set(key, st)
-            await send_cb("🔄 当前没有可接悬赏，正在刷新悬赏令。")
             await send_cb(f"@{self.official_qq} 悬赏令刷新")
             return
 
@@ -361,14 +357,6 @@ class BountyController:
             st.phase = "CHOOSING"
             st.current_title = chosen.title
             await self._set(key, st)
-            chosen_value = await self.estimate_extra_value_dynamic(chosen.extra)
-            await send_cb(
-                f"🎯 已选择悬赏：{chosen.title}\n"
-                f"🎁 额外机缘：{chosen.extra or '无'}\n"
-                f"💰 估算价值：{chosen_value}\n"
-                f"📌 正在接取第 {chosen.index} 个悬赏。"
-            )
-
 
             if any(s in (chosen.extra or "") or s in (chosen.title or "") for s in PRIORITY_SPECIAL_ITEMS):
                 self._info(f"[bounty] 命中特殊机缘物品，优先抢取：编号{chosen.index}「{chosen.title}」 额外：{chosen.extra}")
@@ -414,7 +402,6 @@ class BountyController:
             st.wake_at_ts = 0.0
             await self._set(key, st)
             if send_cb:
-                await send_cb("✅ 悬赏已结算完成，正在继续探测下一轮悬赏。")
                 await send_cb(f"@{self.official_qq} 悬赏令查看")
             return
 
@@ -450,7 +437,6 @@ class BountyController:
             st.phase = "SETTLING"
             st.settle_at_ts = 0.0
             await self._set(key, st)
-            await send_cb("⏰ 已到悬赏预计结算时间，正在发送悬赏令结算。")
             await send_cb(f"@{self.official_qq} 悬赏令结算")
             return
 

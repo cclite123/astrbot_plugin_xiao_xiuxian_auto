@@ -123,14 +123,14 @@ class EndlessTowerController:
 
     async def cmd_enable(self, key: str, arg: str, send_cb) -> str:
         if not self.module_enabled:
-            return "🛑 自动无尽妖塔模块已在配置中关闭。"
+            return "🛑 无尽妖塔模块已在配置中关闭。"
         target_count = 0
         arg = str(arg or "").strip()
         if arg:
             try:
                 target_count = int(arg)
             except Exception:
-                return "❌ 次数格式错误，请使用：开启自动无尽 或 开启自动无尽 100"
+                return "❌ 次数格式错误，请使用：开启无尽 或 开启无尽 100"
             if target_count <= 0:
                 return "❌ 挑战次数需为正整数；不填次数表示无限挑战。"
 
@@ -149,7 +149,7 @@ class EndlessTowerController:
         if st.check_mp_enabled:
             mp_line += f"（阈值 {st.mp_threshold}%）"
         return (
-            f"✅ 已开启自动无尽妖塔：{limit}\n"
+            f"✅ 已开启无尽妖塔：{limit}\n"
             f"{mp_line}\n"
             f"⏰ 首次动作：约 {fmt_ts(st.next_action_ts)}"
         )
@@ -163,24 +163,24 @@ class EndlessTowerController:
         st.pending_action = ""
         st.failure_count = 0
         await self._set(key, st)
-        return "🛑 已关闭自动无尽妖塔。"
+        return "🛑 已关闭无尽妖塔。"
 
     async def cmd_enable_mp_check(self, key: str) -> str:
         st = await self._get(key)
         st.check_mp_enabled = True
         await self._set(key, st)
-        return f"✅ 已开启无尽真元检测，当前阈值：{st.mp_threshold}%"
+        return f"✅ 已开启真元检测，当前阈值：{st.mp_threshold}%"
 
     async def cmd_disable_mp_check(self, key: str) -> str:
         st = await self._get(key)
         st.check_mp_enabled = False
         await self._set(key, st)
-        return "🛑 已关闭无尽真元检测。"
+        return "🛑 已关闭真元检测。"
 
     async def cmd_set_mp_threshold(self, key: str, arg: str) -> str:
         arg = str(arg or "").strip()
         if not re.fullmatch(r"\d{1,4}", arg):
-            return "❌ 真元检测数值需为 0-9999 内数字，例如：设置无尽真元检测 600"
+            return "❌ 真元检测数值需为 0-9999 内数字，例如：设置真元检测 600"
         threshold = int(arg)
         if threshold < 0 or threshold > 9999:
             return "❌ 真元检测数值需在 0-9999 范围内。"
@@ -194,7 +194,7 @@ class EndlessTowerController:
         next_ts = st.wake_at_ts if st.phase == "RESTING" else st.next_action_ts
         last_mp = "未知" if st.last_mp < 0 else f"{st.last_mp:g}%"
         return (
-            "📊【自动无尽妖塔状态】\n"
+            "📊【无尽妖塔状态】\n"
             f"状态：{'✅开启' if st.enabled else '🛑关闭'}\n"
             f"阶段：{_phase_label(st.phase)}\n"
             f"进度：{_format_limit(st.done_count, st.target_count)}\n"
@@ -221,14 +221,14 @@ class EndlessTowerController:
             st.pending_action = ""
             await self._set(key, st)
             if send_cb:
-                await send_cb(f"🛑 自动无尽妖塔已停止：{reason}，连续异常 {st.failure_count}/{self.max_failures}。")
+                await send_cb(f"🛑 无尽妖塔已停止：{reason}，连续异常 {st.failure_count}/{self.max_failures}。")
             return
         st.phase = "READY"
         st.pending_action = ""
         st.next_action_ts = time.time() + self.action_delay_sec
         await self._set(key, st)
         if send_cb:
-            await send_cb(f"⚠️ 自动无尽妖塔：{reason}，稍后重试（{st.failure_count}/{self.max_failures}）。")
+            await send_cb(f"⚠️ 无尽妖塔：{reason}，稍后重试（{st.failure_count}/{self.max_failures}）。")
 
     async def tick(self, key: str, send_cb) -> None:
         st = await self._get(key)
@@ -242,7 +242,7 @@ class EndlessTowerController:
             st.next_action_ts = 0.0
             await self._set(key, st)
             if send_cb:
-                await send_cb(f"✅ 自动无尽妖塔已完成 {st.done_count}/{st.target_count} 次，已停止。")
+                await send_cb(f"✅ 无尽妖塔已完成 {st.done_count}/{st.target_count} 次，已停止。")
             return
 
         if st.phase == "RESTING":
@@ -292,7 +292,7 @@ class EndlessTowerController:
             st.pending_action = ""
             await self._set(key, st)
             if send_cb:
-                await send_cb(f"🛑 自动无尽妖塔：挑战失败（{_format_limit(st.done_count, st.target_count)}），已关闭。")
+                await send_cb(f"🛑 无尽妖塔：挑战失败（{_format_limit(st.done_count, st.target_count)}），已关闭。")
             return
 
         if (
@@ -309,7 +309,7 @@ class EndlessTowerController:
                 st.next_action_ts = 0.0
                 await self._set(key, st)
                 if send_cb:
-                    await send_cb(f"✅ 自动无尽妖塔已完成 {st.done_count}/{st.target_count} 次，已停止。")
+                    await send_cb(f"✅ 无尽妖塔已完成 {st.done_count}/{st.target_count} 次，已停止。")
                 return
             st.phase = "READY"
             st.next_action_ts = time.time() + self.action_delay_sec

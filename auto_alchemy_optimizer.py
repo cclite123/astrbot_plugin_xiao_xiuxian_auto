@@ -299,7 +299,6 @@ class AutoAlchemyOptimizer:
                 if p > 0:
                     result[self.normalize_name(str(grade_or_name))] = p
         return result
-
     def _save_herb_max_prices(self, prices: Dict[str, float]) -> None:
         """保存药材最高价 YAML 配置。"""
         if not self.herb_max_prices_path or yaml is None:
@@ -386,7 +385,7 @@ class AutoAlchemyOptimizer:
 
     async def cmd_start(self, key: str, send_cb) -> str:
         if not self.enabled:
-            return "🛑 自动炼丹模块已关闭。"
+            return "🛑 炼丹模块已关闭。"
         if not self.recipe_path or not os.path.exists(self.recipe_path):
             return f"❌ 未找到丹方文件：{self.recipe_path}\n请把配方查询.txt 放到 data/alchemy_recipes.txt。"
         if self.inventory_parser is None:
@@ -416,7 +415,7 @@ class AutoAlchemyOptimizer:
         async with lock:
             old = self.jobs.get(key)
             if old and old.phase not in {"DONE", "STOPPED"}:
-                return f"⚠️ 自动炼丹已有任务运行中（阶段：{old.phase}），请先等待完成、暂停或关闭。"
+                return f"⚠️ 炼丹已有任务运行中（阶段：{old.phase}），请先等待完成、暂停或关闭。"
             job = AutoAlchemyJob(
                 phase="COLLECTING",
                 report_mode="batch_buy",
@@ -441,11 +440,11 @@ class AutoAlchemyOptimizer:
             self.jobs[key] = job
         dyn_note = ""
         if self.dynamic_herb_buy_during_scan and self.herb_max_prices:
-            dyn_note = f"\n🛒 已启用坊市动态购买：遍历坊市时自动购买符合最高价的药材（{len(self.herb_max_prices)} 种已配置）。"
+            dyn_note = f"\n🛒 已启用坊市动态购买：遍历坊市时购买符合最高价的药材（{len(self.herb_max_prices)} 种已配置）。"
         await self._send_page(job, send_cb)
         return (
-            "✅ 已启动自动炼丹\n"
-            "📊 正在遍历坊市1-8页采集药材价格；采集完成后将读取背包药材进行智能抵扣。"
+            "✅ 已启动炼丹流程\n"
+            "📊 正在遍历坊市1-8页采集药材价格；采集完成后将读取背包药材进行背包抵扣。"
             f"{dyn_note}"
             f"{fast_note}"
         )
@@ -453,11 +452,11 @@ class AutoAlchemyOptimizer:
     async def cmd_backpack(self, key: str, send_cb) -> str:
         """根据药材背包已有药材匹配最优丹方，只使用背包药材，不做坊市购买，盈利>10万即可炼制。"""
         if not self.enabled:
-            return "🛑 自动炼丹模块已关闭。"
+            return "🛑 炼丹模块已关闭。"
         if not self.recipe_path or not os.path.exists(self.recipe_path):
             return f"❌ 未找到丹方文件：{self.recipe_path}\n请把配方查询.txt 放到 data/alchemy_recipes.txt。"
         if self.inventory_parser is None:
-            return "❌ 背包解析器不可用，无法启动自动背包炼丹。"
+            return "❌ 背包解析器不可用，无法启动背包炼丹。"
 
         cached = self._read_snapshot()
         initial_prices: Dict[str, float] = {}
@@ -470,13 +469,13 @@ class AutoAlchemyOptimizer:
             initial_pages = dict(cached.get("pages_by_name") or {})
             fast_note = "\n⚡ 已加载上次坊市价格快照用于利润计算；背包匹配后只使用背包药材，不做坊市购买。"
         else:
-            fast_note = "\n⚠️ 当前没有可用坊市价格快照，请先发送“开启自动炼丹”拉取坊市价格后再使用背包炼丹。"
+            fast_note = "\n⚠️ 当前没有可用坊市价格快照，请先发送“开启炼丹”拉取坊市价格后再使用背包炼丹。"
 
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             old = self.jobs.get(key)
             if old and old.phase not in {"DONE", "STOPPED"}:
-                return f"⚠️ 自动炼丹已有任务运行中（阶段：{old.phase}），请先等待完成、暂停或关闭。"
+                return f"⚠️ 炼丹已有任务运行中（阶段：{old.phase}），请先等待完成、暂停或关闭。"
             job = AutoAlchemyJob(
                 phase="BAG_COLLECTING",
                 report_mode="backpack_buy",
@@ -501,17 +500,17 @@ class AutoAlchemyOptimizer:
             self.jobs[key] = job
         await self._send_backpack_page(job, send_cb)
         return (
-            "✅ 已启动自动背包炼丹\n"
+            "✅ 已启动背包炼丹\n"
             "📦 正在读取药材背包；只使用背包已有药材，不做坊市购买。"
             f"{fast_note}"
         )
 
     async def cmd_target(self, key: str, args: str, send_cb) -> str:
         if not self.enabled:
-            return "🛑 自动炼丹模块已关闭。"
+            return "🛑 炼丹模块已关闭。"
         pill, qty = self._parse_target_args(args)
         if not pill or qty <= 0:
-            return "❌ 用法：自动炼丹 丹药名称 数量\n示例：自动炼丹 化煞魔丸 3\n说明：数量代表炼制炉数。"
+            return "❌ 用法：炼丹 丹药名称 数量\n示例：炼丹 化煞魔丸 3\n说明：数量代表炼制炉数。"
         if not self.recipe_path or not os.path.exists(self.recipe_path):
             return f"❌ 未找到丹方文件：{self.recipe_path}\n请把配方查询.txt 放到 data/alchemy_recipes.txt。"
         recipes_for_pill = [r for r in self._load_recipes() if r.pill == pill]
@@ -531,8 +530,8 @@ class AutoAlchemyOptimizer:
             send_cb,
             report_mode="target_buy",
             mode="target",
-            title="指定丹药自动炼丹",
-            intro=f"✅ 已启动指定丹药自动炼丹：{pill} ×{qty}炉",
+            title="指定丹药炼丹",
+            intro=f"✅ 已启动指定丹药炼丹：{pill} ×{qty}炉",
             scan_pages=pages,
             target_pill=pill,
             target_rounds=qty,
@@ -553,21 +552,21 @@ class AutoAlchemyOptimizer:
     async def cmd_pause(self, key: str) -> str:
         job = self.jobs.get(key)
         if not job:
-            return "自动炼丹：当前没有运行中的流程。"
+            return "炼丹流程：当前没有运行中的流程。"
         if job.phase == "PAUSED":
-            return f"自动炼丹：当前已经暂停。\n原因：{job.paused_reason or '等待人工处理'}"
+            return f"炼丹流程：当前已经暂停。\n原因：{job.paused_reason or '等待人工处理'}"
         job.phase_before_pause = job.phase
         job.phase = "PAUSED"
         job.paused_reason = "用户手动暂停"
         job.paused_at = job.updated_at = time.time()
-        return "⏸️ 自动炼丹已暂停。\n当前队列和进度已保留；发送「继续自动炼丹」恢复，或发送「关闭自动炼丹」终止。"
+        return "⏸️ 炼丹流程已暂停。\n当前队列和进度已保留；发送「继续炼丹」恢复，或发送「关闭炼丹」终止。"
 
     async def cmd_resume(self, key: str, send_cb) -> str:
         job = self.jobs.get(key)
         if not job:
-            return "自动炼丹：当前没有可继续的流程。"
+            return "炼丹流程：当前没有可继续的流程。"
         if job.phase != "PAUSED":
-            return f"自动炼丹：当前未暂停，阶段：{job.phase}。"
+            return f"炼丹流程：当前未暂停，阶段：{job.phase}。"
         prev = job.phase_before_pause or ""
         reason = job.paused_reason or ""
         job.paused_reason = ""
@@ -588,37 +587,37 @@ class AutoAlchemyOptimizer:
                 job.retry_count = 0
                 self.jobs[key] = job
                 await self._send_page(job, send_cb)
-                return f"▶️ 自动炼丹继续执行。\n暂停原因：{reason}\n正在重新查看 {name} 所在第 {page} 页，获取最新购买指令后继续。"
+                return f"▶️ 炼丹流程继续执行。\n暂停原因：{reason}\n正在重新查看 {name} 所在第 {page} 页，获取最新购买指令后继续。"
             job.phase = "BUYING"
             self.jobs[key] = job
             await self._send_next_batch_purchase_or_start_alchemy(key, job, send_cb)
-            return "▶️ 自动炼丹继续执行，正在处理下一个购买项。"
+            return "▶️ 炼丹流程继续执行，正在处理下一个购买项。"
         if prev in {"ALCHEMY_WAIT", "ALCHEMY"}:
             job.phase = "ALCHEMY_WAIT"
             self.jobs[key] = job
             await self._send_next_alchemy_command(key, job, send_cb)
-            return f"▶️ 自动炼丹继续执行。\n暂停原因：{reason}\n正在继续发送当前炼丹配方。"
+            return f"▶️ 炼丹流程继续执行。\n暂停原因：{reason}\n正在继续发送当前炼丹配方。"
         if prev == "COLLECTING_DYN_BUY_WAIT":
             job.dynamic_buy_fail += 1
             job.dynamic_buy_current_item = {}
             job.dynamic_buy_index += 1
             self.jobs[key] = job
             await self._send_next_dynamic_buy(key, job, send_cb)
-            return f"▶️ 自动炼丹继续执行。\n暂停原因：{reason}\n已跳过当前动态购买，继续采集流程。"
+            return f"▶️ 炼丹流程继续执行。\n暂停原因：{reason}\n已跳过当前动态购买，继续采集流程。"
         job.phase = prev or "BUYING"
         self.jobs[key] = job
-        return f"▶️ 自动炼丹已恢复，当前阶段：{job.phase}。"
+        return f"▶️ 炼丹流程已恢复，当前阶段：{job.phase}。"
 
     async def cmd_stop(self, key: str) -> str:
         job = self.jobs.pop(key, None)
         if not job:
-            return "自动炼丹：当前没有运行中的流程。"
-        return "🛑 自动炼丹已关闭，本轮购买队列、炼丹队列和等待状态已清空。"
+            return "炼丹流程：当前没有运行中的流程。"
+        return "🛑 炼丹流程已关闭，本轮购买队列、炼丹队列和等待状态已清空。"
 
     async def cmd_auto_buy_herbs_start(self, key: str, rounds: int, send_cb) -> str:
-        """开启自动购买药材。"""
+        """开启购买药材流程。"""
         if not self.enabled:
-            return "🛑 自动炼丹模块已关闭。"
+            return "🛑 炼丹模块已关闭。"
         if not self.herb_max_prices:
             return "❌ 未找到药材最高价配置文件或配置为空。\n请将 herb_max_prices.yaml 放入 data/ 目录。"
         rounds = max(1, min(99, int(rounds or 1)))
@@ -642,21 +641,21 @@ class AutoAlchemyOptimizer:
             self.jobs[key] = job
         await self._send_herb_buy_page(job, send_cb)
         return (
-            f"✅ 已启动自动购买药材\n"
+            f"✅ 已启动购买药材流程\n"
             f"📦 轮次：{rounds}，当前第 1 轮\n"
             f"🔍 正在查看坊市药材第 1 页\n"
             f"💰 最高价配置已加载：{len(self.herb_max_prices)} 种药材"
         )
 
     async def cmd_auto_buy_herbs_stop(self, key: str) -> str:
-        """关闭自动购买药材。"""
+        """关闭购买药材流程。"""
         job = self.jobs.get(key)
         if not job:
-            return "自动购买药材：当前没有运行中的流程。"
+            return "购买药材流程：当前没有运行中的流程。"
         if job.mode != "herb_buy":
-            return f"当前运行的是「{job.mode}」模式，不是自动购买药材。"
+            return f"当前运行的是「{job.mode}」模式，不是购买药材流程。"
         self.jobs.pop(key, None)
-        return f"🛑 自动购买药材已关闭。\n累计购买成功：{job.herb_buy_total_success} 次，失败：{job.herb_buy_total_fail} 次。"
+        return f"🛑 购买药材流程已关闭。\n累计购买成功：{job.herb_buy_total_success} 次，失败：{job.herb_buy_total_fail} 次。"
 
     async def _send_herb_buy_page(self, job: AutoAlchemyJob, send_cb) -> None:
         """发送坊市查看药材页指令。"""
@@ -708,7 +707,7 @@ class AutoAlchemyOptimizer:
             return
         self.jobs.pop(key, None)
         await send_cb(
-            f"✅【自动购买药材完成】\n"
+            f"✅【购买药材流程完成】\n"
             f"总轮次：{job.herb_buy_rounds}\n"
             f"购买成功：{job.herb_buy_total_success} 次\n"
             f"购买失败：{job.herb_buy_total_fail} 次"
@@ -816,7 +815,7 @@ class AutoAlchemyOptimizer:
         fast_start_note: str = "",
     ) -> str:
         if not self.enabled:
-            return "🛑 自动炼丹模块已关闭。"
+            return "🛑 炼丹模块已关闭。"
         if not self.recipe_path or not os.path.exists(self.recipe_path):
             return f"❌ 未找到丹方文件：{self.recipe_path}\n请把配方查询.txt 放到 data/alchemy_recipes.txt。"
         pages = sorted({int(p) for p in (scan_pages or list(range(1, self.max_page + 1))) if 1 <= int(p) <= self.max_page})
@@ -826,7 +825,7 @@ class AutoAlchemyOptimizer:
         async with lock:
             old = self.jobs.get(key)
             if old and old.phase not in {"DONE", "STOPPED"}:
-                return f"⚠️ 自动炼丹已有任务运行中（阶段：{old.phase}），请先等待完成、暂停或关闭。"
+                return f"⚠️ 炼丹已有任务运行中（阶段：{old.phase}），请先等待完成、暂停或关闭。"
             job = AutoAlchemyJob(
                 phase="COLLECTING",
                 report_mode=report_mode,
@@ -871,13 +870,13 @@ class AutoAlchemyOptimizer:
         job = self.jobs.get(key)
         if not job:
             return (
-                "自动炼丹：当前没有运行中的流程。\n"
+                "炼丹流程：当前没有运行中的流程。\n"
                 f"当前批量配置：最多 {self.max_batch_formula_count} 条主丹方 × 每条 {self.max_formula_per_pill} 炉\n"
                 f"利润阈值：{self.batch_mode_profit_threshold}万 | 背包抵扣：{'是' if self.use_backpack_for_batch_mode else '否'}\n"
                 f"动态购买：{'已开启' if self.dynamic_herb_buy_during_scan else '已关闭'}"
             )
         if job.phase in {"COLLECTING", "COLLECTING_DYN_BUY_WAIT"}:
-            mode_label = "指定丹药" if job.report_mode == "target_buy" else "批量自动炼丹"
+            mode_label = "指定丹药" if job.report_mode == "target_buy" else "批量炼丹"
             dyn_info = ""
             if self.dynamic_herb_buy_during_scan:
                 dyn_info = f"\n动态购买：已开启（成功 {job.dynamic_buy_success} / 失败 {job.dynamic_buy_fail}）"
@@ -885,7 +884,7 @@ class AutoAlchemyOptimizer:
                 dyn_item = (job.dynamic_buy_current_item or {}).get("name", "未知")
                 dyn_info += f"\n动态购买中：{dyn_item}"
             return (
-                f"自动炼丹：{mode_label}采集中\n"
+                f"炼丹流程：{mode_label}采集中\n"
                 f"批量配置：最多 {self.max_batch_formula_count} 条主丹方 × 每条 {self.max_formula_per_pill} 炉\n"
                 f"利润阈值：{self.batch_mode_profit_threshold}万 | 背包抵扣：{'是' if self.use_backpack_for_batch_mode else '否'}\n"
                 f"当前页：{job.current_page}\n"
@@ -898,7 +897,7 @@ class AutoAlchemyOptimizer:
             item = job.batch_current_item or {}
             name = item.get("name") or "未知药材"
             return (
-                "自动炼丹：逐个购买药材中\n"
+                "炼丹流程：逐个购买药材中\n"
                 f"模式：{'指定丹药 ' + job.target_pill if job.mode == 'target' else '批量模式'}\n"
                 f"批量配置：最多 {self.max_batch_formula_count} 条主丹方 × 每条 {self.max_formula_per_pill} 炉\n"
                 f"默认成丹数：{job.yield_count}\n"
@@ -910,14 +909,14 @@ class AutoAlchemyOptimizer:
         if job.phase == "ALCHEMY_WAIT":
             current = job.alchemy_queue[job.alchemy_index] if 0 <= job.alchemy_index < len(job.alchemy_queue) else {}
             return (
-                "自动炼丹：正在逐个炼丹\n"
+                "炼丹流程：正在逐个炼丹\n"
                 f"当前丹药：{current.get('pill', '未知')}\n"
                 f"已发送炼丹指令：{job.alchemy_sent}\n"
                 f"炼丹成功：{job.alchemy_success}/{len(job.alchemy_queue)}"
             )
         if job.phase == "PAUSED":
-            return f"自动炼丹：已暂停\n原因：{job.paused_reason or '等待人工处理'}\n暂停前阶段：{job.phase_before_pause or '未知'}"
-        return f"自动炼丹：运行中，阶段 {job.phase}"
+            return f"炼丹流程：已暂停\n原因：{job.paused_reason or '等待人工处理'}\n暂停前阶段：{job.phase_before_pause or '未知'}"
+        return f"炼丹流程：运行中，阶段 {job.phase}"
 
 
 
@@ -935,7 +934,7 @@ class AutoAlchemyOptimizer:
             return False
         if self._is_daily_limit_stop(clean_text):
             self.jobs.pop(key, None)
-            await send_cb("🛑 检测到小小提示：道友今天已经很努力了。\n本次自动炼丹流程已停止，购买队列与炼丹队列已清空。")
+            await send_cb("🛑 检测到小小提示：道友今天已经很努力了。\n本次炼丹流程已停止，购买队列与炼丹队列已清空。")
             return True
         if job.phase == "PAUSED":
             return True
@@ -969,7 +968,7 @@ class AutoAlchemyOptimizer:
     async def _handle_backpack_collecting(self, key: str, job: AutoAlchemyJob, raw_text: str, clean_text: str, send_cb) -> bool:
         if self.inventory_parser is None:
             self.jobs.pop(key, None)
-            await send_cb("❌ 自动背包炼丹失败：背包解析器不可用。")
+            await send_cb("❌ 背包炼丹失败：背包解析器不可用。")
             return True
         inv_text = self.inventory_parser._cleanup_text(raw_text)
         if not ("拥有数量" in inv_text or "数量" in inv_text or "名字" in inv_text or "☆" in inv_text or ("第" in inv_text and "共" in inv_text and "页" in inv_text)):
@@ -981,7 +980,7 @@ class AutoAlchemyOptimizer:
             items = self.inventory_parser._parse_items(inv_text, CATEGORY_HERB)
         except Exception as e:
             self.jobs.pop(key, None)
-            await send_cb(f"❌ 自动背包炼丹失败：解析药材背包异常：{e}")
+            await send_cb(f"❌ 背包炼丹失败：解析药材背包异常：{e}")
             return True
         for item in items:
             name = self.normalize_name(getattr(item, "name", ""))
@@ -1004,7 +1003,7 @@ class AutoAlchemyOptimizer:
                 await send_cb(
                     f"📦 药材背包读取完成：共识别 {len(job.backpack_counts)} 种药材。\n"
                     "❌ 当前没有可用坊市价格快照，无法计算利润。\n"
-                    "请先发送“开启自动炼丹”拉取坊市价格，然后再使用背包炼丹。"
+                    "请先发送“开启炼丹”拉取坊市价格，然后再使用背包炼丹。"
                 )
                 return True
             job.phase = "COLLECTING"
@@ -1017,7 +1016,7 @@ class AutoAlchemyOptimizer:
             if job.mode == "backpack":
                 note = "当前没有可用坊市价格快照，正在拉取坊市药材1-8页用于计算药材实际成本和缺口采购成本。"
             else:
-                note = "当前没有可用坊市价格快照，正在拉取坊市药材1-8页；采购时会自动抵扣背包已有药材。"
+                note = "当前没有可用坊市价格快照，正在拉取坊市药材1-8页；采购时会抵扣背包已有药材。"
             await send_cb(f"📦 药材背包读取完成：共识别 {len(job.backpack_counts)} 种药材。\n{note}")
             await self._send_page(job, send_cb)
             return True
@@ -1034,7 +1033,7 @@ class AutoAlchemyOptimizer:
             job.retry_count = 0
             await send_cb(
                 f"📦 药材背包读取完成：共识别 {len(job.backpack_counts)} 种药材。\n"
-                "正在刷新本轮预计用到的坊市页；采购时会自动抵扣背包已有药材。"
+                "正在刷新本轮预计用到的坊市页；采购时会抵扣背包已有药材。"
             )
             await self._send_page(job, send_cb)
             return True
@@ -1046,13 +1045,13 @@ class AutoAlchemyOptimizer:
             selected, candidate_count, skipped_count = self._select_backpack_best_candidates(job)
         except Exception as e:
             self.jobs.pop(key, None)
-            await send_cb(f"❌ 自动背包炼丹失败：计算丹方异常：{e}")
+            await send_cb(f"❌ 背包炼丹失败：计算丹方异常：{e}")
             return
         job.batch_selected = selected
         if not selected:
             self.jobs.pop(key, None)
             await send_cb(
-                f"❌【自动背包炼丹】没有找到可执行丹方。\n"
+                f"❌【背包炼丹】没有找到可执行丹方。\n"
                 f"背包药材种类：{len(job.backpack_counts)}\n"
                 f"可计算候选数：{candidate_count}\n"
                 f"跳过配方数：{skipped_count}\n"
@@ -1347,7 +1346,7 @@ class AutoAlchemyOptimizer:
             return
         await send_cb(
             f"📊 坊市价格采集完成：已获取 {len(job.prices)} 种药材价格。\n"
-            "📦 正在读取药材背包用于智能抵扣。"
+            "📦 正在读取药材背包用于背包抵扣。"
         )
         job.phase = "BAG_COLLECTING"
         job.current_page = 1
@@ -1452,7 +1451,7 @@ class AutoAlchemyOptimizer:
         return (
             f"✅ 动态购买已{'开启' if enable else '关闭'}。\n"
             f"当前已配置 {len(self.herb_max_prices)} 种药材最高价。\n"
-            "下次开启自动炼丹时，遍历坊市将" + ("自动购买符合最高价的药材。" if enable else "不会动态购买药材。")
+            "下次开启炼丹时，遍历坊市将" + ("购买符合最高价的药材。" if enable else "不会动态购买药材。")
         )
 
     def _merge_market_page(self, job: AutoAlchemyJob, raw_text: str, page: int) -> None:
@@ -1640,7 +1639,7 @@ class AutoAlchemyOptimizer:
                 return
             if job.retry_count < self.max_page_retries:
                 job.retry_count += 1
-                await send_cb(f"⚠️ 自动炼丹拉取第 {job.current_page} 页超时，正在重试 {job.retry_count}/{self.max_page_retries}。")
+                await send_cb(f"⚠️ 炼丹拉取第 {job.current_page} 页超时，正在重试 {job.retry_count}/{self.max_page_retries}。")
                 if job.phase == "BAG_COLLECTING":
                     await self._send_backpack_page(job, send_cb)
                 else:
@@ -1653,7 +1652,7 @@ class AutoAlchemyOptimizer:
                 await self._start_retry_queue_after_refresh(key, job, send_cb, reason=f"刷新重试页第 {job.current_page} 页超时，无法重试部分药材")
                 return
             self.jobs.pop(key, None)
-            await send_cb(f"❌ 自动炼丹实时价格采集失败：第 {job.current_page} 页超时。为避免使用不完整数据，本次流程已终止。")
+            await send_cb(f"❌ 炼丹实时价格采集失败：第 {job.current_page} 页超时。为避免使用不完整数据，本次流程已终止。")
             return
         if job.phase == "COLLECTING_DYN_BUY_WAIT":
             if now - job.last_command_ts <= self.purchase_response_timeout_sec:
@@ -1662,7 +1661,7 @@ class AutoAlchemyOptimizer:
             name = self.normalize_name(item.get("name", "")) or "未知药材"
             await send_cb(
                 f"⚠️ 动态购买 {name} 后 {int(self.purchase_response_timeout_sec)} 秒内未收到回执；"
-                f"已自动跳过当前动态购买并继续采集。"
+                f"已跳过当前动态购买并继续采集。"
             )
             job.dynamic_buy_fail += 1
             job.dynamic_buy_current_item = {}
@@ -1675,7 +1674,7 @@ class AutoAlchemyOptimizer:
                 return
             item = dict(job.batch_current_item or {})
             name = self.normalize_name(item.get("name", "")) or "未知药材"
-            reason = f"购买 {name} 后 {int(self.purchase_response_timeout_sec)} 秒内未收到有效购买回执；已自动结束验证码空窗期并继续后续购买"
+            reason = f"购买 {name} 后 {int(self.purchase_response_timeout_sec)} 秒内未收到有效购买回执；已结束验证码空窗期并继续后续购买"
             if self.retry_failed_after_batch and not job.retry_after_batch_active:
                 await self._defer_current_purchase_for_retry(key, job, send_cb, reason)
             else:
@@ -1692,10 +1691,10 @@ class AutoAlchemyOptimizer:
                 return
             if job.retry_count < self.max_page_retries:
                 job.retry_count += 1
-                await send_cb(f"⚠️ 自动购买药材拉取第 {job.current_page} 页超时，正在重试 {job.retry_count}/{self.max_page_retries}。")
+                await send_cb(f"⚠️ 购买药材流程拉取第 {job.current_page} 页超时，正在重试 {job.retry_count}/{self.max_page_retries}。")
                 await self._send_herb_buy_page(job, send_cb)
                 return
-            await send_cb(f"⚠️ 自动购买药材第 {job.current_page} 页超时，跳过当前页。")
+            await send_cb(f"⚠️ 购买药材流程第 {job.current_page} 页超时，跳过当前页。")
             await self._finish_herb_buy_page(key, job, send_cb)
             return
         if job.phase == "HERB_BUY_WAIT":
@@ -1705,7 +1704,7 @@ class AutoAlchemyOptimizer:
             name = self.normalize_name(item.get("name", "")) or "未知药材"
             await send_cb(
                 f"⚠️ 购买 {name} 后 {int(self.purchase_response_timeout_sec)} 秒内未收到回执；"
-                f"已自动结束验证码空窗期并跳过当前购买。"
+                f"已结束验证码空窗期并跳过当前购买。"
             )
             job.herb_buy_failed.append(name)
             job.herb_buy_total_fail += 1
@@ -2354,14 +2353,14 @@ class AutoAlchemyOptimizer:
             dyn_note = f"\n🛒 坊市动态购买完成：成功 {job.dynamic_buy_success} 次，失败 {job.dynamic_buy_fail} 次。"
 
         if use_backpack:
-            # 背包抵扣模式：使用 _resolve_recipe_with_backpack 进行智能抵扣
+            # 背包抵扣模式：使用 _resolve_recipe_with_backpack 进行背包抵扣
             try:
                 selected, candidate_count, skipped_count = self._select_batch_with_backpack(
                     job, threshold=threshold,
                 )
             except Exception as e:
                 self.jobs.pop(key, None)
-                await send_cb(f"❌ 自动炼丹失败：计算丹方异常：{e}")
+                await send_cb(f"❌ 炼丹失败：计算丹方异常：{e}")
                 return
             job.batch_selected = selected
             job.batch_reserve_candidates = []
@@ -2369,12 +2368,12 @@ class AutoAlchemyOptimizer:
                 self.jobs.pop(key, None)
                 self._write_snapshot(job.prices, "", job.buy_commands, job.pages_by_name)
                 await send_cb(
-                    f"❌【自动炼丹】未找到利润 > {threshold}万 的丹方。{dyn_note}\n"
+                    f"❌【炼丹流程】未找到利润 > {threshold}万 的丹方。{dyn_note}\n"
                     f"背包药材种类：{len(job.backpack_counts)}\n"
                     f"坊市价格数：{len(job.prices)}\n"
                     f"可计算候选数：{candidate_count}\n"
                     f"跳过配方数：{skipped_count}\n"
-                    f"筛选规则：成丹 {job.yield_count} 颗利润 > {threshold}万，背包药材智能抵扣。"
+                    f"筛选规则：成丹 {job.yield_count} 颗利润 > {threshold}万，背包药材背包抵扣。"
                 )
                 return
             await self._prepare_and_start_buying(key, job, send_cb, candidate_count, skipped_count)
@@ -2386,7 +2385,7 @@ class AutoAlchemyOptimizer:
                 )
             except Exception as e:
                 self.jobs.pop(key, None)
-                await send_cb(f"❌ 自动炼丹全功能流程失败：读取丹方文件异常：{e}")
+                await send_cb(f"❌ 炼丹全功能流程失败：读取丹方文件异常：{e}")
                 return
             if self.batch_repeat_until_threshold:
                 selected, reserve = self._select_batch_primary_and_reserve(candidates, min_profit=threshold)
@@ -2416,16 +2415,16 @@ class AutoAlchemyOptimizer:
             candidates, skipped_no_price, skipped_no_wildcard = self._compute_candidates(job.prices, job.buy_commands, job.pages_by_name, yield_count=job.yield_count, pill_filter=job.target_pill, allow_unknown_sale=self.target_unknown_price_execute)
         except Exception as e:
             self.jobs.pop(key, None)
-            await send_cb(f"❌ 指定丹药自动炼丹失败：读取丹方文件异常：{e}")
+            await send_cb(f"❌ 指定丹药炼丹失败：读取丹方文件异常：{e}")
             return
         allow_unknown = self.target_unknown_price_execute and job.target_pill not in FIXED_PILL_SALE_PRICE
         best = self._select_best_for_target(candidates, min_profit=job.min_profit, allow_unknown_sale=allow_unknown)
         if not best:
             self.jobs.pop(key, None)
             msg = (
-                f"❌ 指定丹药自动炼丹停止：{job.target_pill} 当前没有药材价格完整的可用丹方。\n"
+                f"❌ 指定丹药炼丹停止：{job.target_pill} 当前没有药材价格完整的可用丹方。\n"
                 if allow_unknown
-                else f"❌ 指定丹药自动炼丹停止：{job.target_pill} 当前没有成丹 {job.yield_count} 颗利润不亏本的可用丹方。\n"
+                else f"❌ 指定丹药炼丹停止：{job.target_pill} 当前没有成丹 {job.yield_count} 颗利润不亏本的可用丹方。\n"
             )
             msg += f"可计算配方数：{len(candidates)}；因缺少实时价格跳过：{skipped_no_price + skipped_no_wildcard}。"
             await send_cb(msg)
@@ -2835,7 +2834,7 @@ class AutoAlchemyOptimizer:
             )
         except Exception as e:
             self._refresh_batch_buy_expected_preserving_queue(job)
-            target_label = job.target_pill if job.mode == "target" else "自动炼丹"
+            target_label = job.target_pill if job.mode == "target" else "炼丹流程"
             return True, f"⚠️ {target} 价格变化后重新计算 {target_label} 失败：{e}。当前购买队列保持不变，按原顺序继续。"
 
         replaced_notes: List[str] = []
@@ -3020,7 +3019,7 @@ class AutoAlchemyOptimizer:
         job.paused_reason = reason
         job.paused_at = job.updated_at = time.time()
         self.jobs[key] = job
-        await send_cb(f"⚠️【自动炼丹已暂停】\n原因：{reason}\n当前不会继续发送购买或炼丹指令。\n请处理后发送「继续自动炼丹」恢复，或发送「关闭自动炼丹」终止。")
+        await send_cb(f"⚠️【炼丹流程已暂停】\n原因：{reason}\n当前不会继续发送购买或炼丹指令。\n请处理后发送「继续炼丹」恢复，或发送「关闭炼丹」终止。")
 
     def _resolve_recipe(self, recipe: Recipe, prices: Dict[str, float], buy_commands: Optional[Dict[str, str]] = None, pages_by_name: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:
         buy_commands = buy_commands or {}
@@ -3084,7 +3083,7 @@ class AutoAlchemyOptimizer:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.page_index_path)
         except Exception as e:
-            self._warn(f"写入自动炼丹页码索引失败：{e}")
+            self._warn(f"写入炼丹页码索引失败：{e}")
 
     def _page_for_name(self, name: str) -> int:
         idx = self._read_page_index()
@@ -3145,7 +3144,7 @@ class AutoAlchemyOptimizer:
         plan = job.batch_purchase_plan or []
         total_purchase_count = sum(int(x.get("qty") or 0) for x in plan)
         total_profit = sum(float(c.get("score_profit", 0)) for c in selected if not c.get("unknown_sale"))
-        title = "指定丹药" if job.mode == "target" else "背包炼丹" if job.mode == "backpack" else "自动炼丹"
+        title = "指定丹药" if job.mode == "target" else "背包炼丹" if job.mode == "backpack" else "炼丹流程"
         lines: List[str] = []
         lines.append(f"💰【{title}利润丹方】")
         lines.append(f"成丹：{job.yield_count}颗｜丹方：{len(selected)}条｜购买：{total_purchase_count}次｜预计利润：{self._fmt_num(total_profit)}万")
@@ -3160,7 +3159,7 @@ class AutoAlchemyOptimizer:
 
     def _format_full_done_report(self, job: AutoAlchemyJob, no_alchemy: bool = False) -> str:
         lines: List[str] = []
-        title = "✅【自动炼丹结束】" if not no_alchemy else "✅【自动炼丹购买结束】"
+        title = "✅【炼丹流程结束】" if not no_alchemy else "✅【炼丹购买结束】"
         lines.append(title)
         lines.append(f"购买成功：{job.batch_success_count}/{job.batch_buy_expected}｜炼丹成功：{job.alchemy_success}/{len(job.alchemy_queue)}")
         active = [c for c in (job.batch_selected or []) if not c.get("abandoned")]
@@ -3234,7 +3233,7 @@ class AutoAlchemyOptimizer:
                         commands[name] = cmd
             return {"updated_at": updated_at, "prices": prices, "pages_by_name": pages, "buy_commands": commands}
         except Exception as e:
-            self._warn(f"读取自动炼丹快照失败：{e}")
+            self._warn(f"读取炼丹快照失败：{e}")
             return {}
 
     def _batch_pages_from_cached_snapshot(self, prices: Dict[str, float], buy_commands: Dict[str, str], pages_by_name: Dict[str, int]) -> List[int]:
@@ -3266,7 +3265,7 @@ class AutoAlchemyOptimizer:
             "buy_commands": buy_commands or {},
             "pages_by_name": pages_by_name or {},
             "report": report,
-            "note": "自动炼丹实时快照，仅供排查；成本计算以本轮实时采集为准。",
+            "note": "炼丹流程实时快照，仅供排查；成本计算以本轮实时采集为准。",
         }
         try:
             os.makedirs(os.path.dirname(self.snapshot_path), exist_ok=True)
@@ -3275,7 +3274,7 @@ class AutoAlchemyOptimizer:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.snapshot_path)
         except Exception as e:
-            self._warn(f"写入自动炼丹快照失败：{e}")
+            self._warn(f"写入炼丹快照失败：{e}")
 
     @staticmethod
     def _fmt_num(v) -> str:
