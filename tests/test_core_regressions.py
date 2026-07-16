@@ -286,6 +286,10 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("accountLoadGeneration", page_text)
         self.assertIn("generation !== accountLoadGeneration", page_text)
         self.assertIn("会中断该账号正在进行的任务", page_text)
+        self.assertNotIn("?self_id=", page_text)
+        self.assertIn("apiPost('config/load'", page_text)
+        self.assertIn("apiPost('alchemy_rules/load'", page_text)
+        self.assertIn("apiPost('herb_prices/load'", page_text)
 
 
 if __name__ == "__main__":

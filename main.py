@@ -862,7 +862,7 @@ class XiaoXiuxianAuto(Star):
             return
         try:
             self.context.register_web_api(
-                f"/{PLUGIN_NAME}/config", self._page_get_config, ["GET"], "获取小小修仙插件配置"
+                f"/{PLUGIN_NAME}/config/load", self._page_load_config, ["POST"], "获取小小修仙插件配置"
             )
             self.context.register_web_api(
                 f"/{PLUGIN_NAME}/accounts", self._page_get_accounts, ["GET"], "获取可配置账号"
@@ -874,13 +874,13 @@ class XiaoXiuxianAuto(Star):
                 f"/{PLUGIN_NAME}/status", self._page_get_status, ["GET"], "小小修仙运行状态"
             )
             self.context.register_web_api(
-                f"/{PLUGIN_NAME}/alchemy_rules", self._page_get_alchemy_rules, ["GET"], "炼金白黑名单"
+                f"/{PLUGIN_NAME}/alchemy_rules/load", self._page_load_alchemy_rules, ["POST"], "炼金白黑名单"
             )
             self.context.register_web_api(
                 f"/{PLUGIN_NAME}/alchemy_rules/save", self._page_save_alchemy_rules, ["POST"], "保存炼金白黑名单"
             )
             self.context.register_web_api(
-                f"/{PLUGIN_NAME}/herb_prices", self._page_get_herb_prices, ["GET"], "药材上限价"
+                f"/{PLUGIN_NAME}/herb_prices/load", self._page_load_herb_prices, ["POST"], "药材上限价"
             )
             self.context.register_web_api(
                 f"/{PLUGIN_NAME}/herb_prices/save", self._page_save_herb_prices, ["POST"], "保存药材上限价"
@@ -890,22 +890,6 @@ class XiaoXiuxianAuto(Star):
         except Exception as e:
             self._page_api_enabled = False
             logger.warning(f"[xiao_xiuxian_auto] 注册 Page API 失败：{e}")
-
-    @staticmethod
-    def _page_query_value(name: str) -> str:
-        if request is None:
-            return ""
-        for attr_name in ("args", "query_params", "query"):
-            try:
-                values = getattr(request, attr_name, None)
-                if values is None:
-                    continue
-                value = values.get(name) if hasattr(values, "get") else None
-                if value is not None:
-                    return str(value).strip()
-            except Exception:
-                continue
-        return ""
 
     @staticmethod
     def _load_page_schema() -> Dict[str, Any]:
@@ -940,8 +924,11 @@ class XiaoXiuxianAuto(Star):
     async def _page_validate_account(self, self_id: str) -> bool:
         return str(self_id) in {row["self_id"] for row in await self._page_account_rows()}
 
-    async def _page_get_config(self):
-        self_id = self._page_query_value("self_id")
+    async def _page_load_config(self):
+        if request is None:
+            return error_response("web API 不可用", status_code=500)
+        payload = await request.json(default={})
+        self_id = str(payload.get("self_id") or "").strip() if isinstance(payload, dict) else ""
         if not self_id or not await self._page_validate_account(self_id):
             return error_response("请选择已配置或已绑定账号", status_code=400)
         schema = self._load_page_schema()
@@ -989,8 +976,11 @@ class XiaoXiuxianAuto(Star):
             "bound_keys": len(self._known_keys),
         })
 
-    async def _page_get_alchemy_rules(self):
-        self_id = self._page_query_value("self_id")
+    async def _page_load_alchemy_rules(self):
+        if request is None:
+            return error_response("web API 不可用", status_code=500)
+        payload = await request.json(default={})
+        self_id = str(payload.get("self_id") or "").strip() if isinstance(payload, dict) else ""
         if not self_id or not await self._page_validate_account(self_id):
             return error_response("请选择已配置或已绑定账号", status_code=400)
         inv = self._controller("inventory_ops", f"{self_id}:page")
@@ -1018,8 +1008,11 @@ class XiaoXiuxianAuto(Star):
             return error_response(f"保存名单失败：{e}", status_code=500)
         return json_response({"ok": True, "self_id": self_id})
 
-    async def _page_get_herb_prices(self):
-        self_id = self._page_query_value("self_id")
+    async def _page_load_herb_prices(self):
+        if request is None:
+            return error_response("web API 不可用", status_code=500)
+        payload = await request.json(default={})
+        self_id = str(payload.get("self_id") or "").strip() if isinstance(payload, dict) else ""
         if not self_id or not await self._page_validate_account(self_id):
             return error_response("请选择已配置或已绑定账号", status_code=400)
         optimizer = self._controller("auto_alchemy", f"{self_id}:page")

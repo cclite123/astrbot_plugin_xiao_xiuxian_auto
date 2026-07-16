@@ -22,13 +22,16 @@ const bridge = _realBridge || {
   onContext: () => {},
   apiGet: async (ep) => {
     if (ep === 'accounts') return { accounts: MOCK_ACCOUNTS };
-    if (ep.startsWith('config?')) return { config: MOCK_CONFIG, schema: MOCK_SCHEMA };
     if (ep === 'status') return { bound_keys: 3 };
-    if (ep.startsWith('alchemy_rules?')) return { whitelist_pill: ['培元丹','回元丹','养元丹'], blacklist_equip: ['龙渊剑','惊雷'], blacklist_artifact: ['两仪心经'] };
-    if (ep.startsWith('herb_prices?')) return { prices: { '罗犀草': 100, '何首乌': 500, '九叶芝': 2000, '地心火芝': 8000 } };
     return {};
   },
-  apiPost: async (ep, body) => { console.log('[preview] save', ep, body); return { ok: true, reloaded: true }; },
+  apiPost: async (ep, body) => {
+    if (ep === 'config/load') return { config: MOCK_CONFIG, schema: MOCK_SCHEMA };
+    if (ep === 'alchemy_rules/load') return { whitelist_pill: ['培元丹','回元丹','养元丹'], blacklist_equip: ['龙渊剑','惊雷'], blacklist_artifact: ['两仪心经'] };
+    if (ep === 'herb_prices/load') return { prices: { '罗犀草': 100, '何首乌': 500, '九叶芝': 2000, '地心火芝': 8000 } };
+    console.log('[preview] save', ep, body);
+    return { ok: true, reloaded: true };
+  },
 };
 
 const tabsEl = document.getElementById('tabs');
@@ -62,10 +65,6 @@ function toast(msg, ok = true) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 3000);
-}
-
-function accountEndpoint(name, selfId = currentAccount) {
-  return `${name}?self_id=${encodeURIComponent(selfId)}`;
 }
 
 function fieldType(item) {
@@ -196,7 +195,7 @@ function renderAlchemyTab() {
   searchEl.style.display = 'none';
   [...tabsEl.children].forEach(b => b.classList.toggle('active', b.dataset.key === '__alchemy'));
   formEl.innerHTML = '<div class="loading">加载炼金名单…</div>';
-  bridge.apiGet(accountEndpoint('alchemy_rules', selfId)).then(data => {
+  bridge.apiPost('alchemy_rules/load', { self_id: selfId }).then(data => {
     if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
     const wl = (data && data.whitelist_pill) || [];
     const be = (data && data.blacklist_equip) || [];
@@ -246,7 +245,7 @@ function renderHerbTab() {
   searchEl.style.display = 'none';
   [...tabsEl.children].forEach(b => b.classList.toggle('active', b.dataset.key === '__herb'));
   formEl.innerHTML = '<div class="loading">加载药材上限价…</div>';
-  bridge.apiGet(accountEndpoint('herb_prices', selfId)).then(data => {
+  bridge.apiPost('herb_prices/load', { self_id: selfId }).then(data => {
     if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
     const prices = (data && data.prices) || {};
     formEl.innerHTML = `
@@ -359,7 +358,7 @@ async function loadAccount(selfId) {
   saveBtn.disabled = true;
   formEl.innerHTML = '<div class="loading">加载账号配置…</div>';
   try {
-    const data = await bridge.apiGet(accountEndpoint('config', selfId));
+    const data = await bridge.apiPost('config/load', { self_id: selfId });
     if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
     schema = (data && data.schema) || {};
     config = (data && data.config) || {};
