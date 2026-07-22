@@ -140,6 +140,62 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     f"{name} tick re-entered without advancing state: {send.messages!r}",
                 )
 
+    async def test_only_secret_entry_waits_for_a_fresh_hp_reply(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        plugin = _make_plugin_shell(main)
+        send_cb = plugin._make_send_cb(key)
+
+        await plugin.bounty.cmd_enable(key, send_cb)
+        await plugin.secret.cmd_enable(key, send_cb)
+        await plugin.sect.cmd_enable(key, send_cb)
+
+        self.assertEqual(
+            [
+                "@3889001741 悬赏令查看",
+                "@3889001741 我的状态",
+                "@3889001741 宗门任务接取",
+            ],
+            plugin._official_messages,
+        )
+
+    async def test_secret_entry_with_fresh_sufficient_hp_starts_immediately(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        plugin = _make_plugin_shell(main)
+        await plugin.cultivate._set(
+            key,
+            CultivateState(hp_percent=80.0, hp_check_ts=time.time(), hp_check_pending=False),
+        )
+
+        await plugin.secret.cmd_enable(key, plugin._make_send_cb(key))
+
+        self.assertEqual(["@3889001741 探索秘境"], plugin._official_messages)
+
+    async def test_secret_low_hp_uses_temporary_cultivation_then_restores_idle(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        plugin = _make_plugin_shell(main)
+        send_cb = plugin._make_send_cb(key)
+
+        await plugin.secret.cmd_enable(key, send_cb)
+        await plugin.cultivate.on_official_text(key, "气血: 20/100", send_cb)
+        recovering = await plugin.cultivate._get(key)
+        self.assertEqual(MODE_CULTIVATE, recovering.mode)
+        self.assertTrue(recovering.is_resting)
+        self.assertIn("@3889001741 修炼", plugin._official_messages)
+
+        async def no_sleep(_delay):
+            return None
+
+        with patch("astrbot_plugin_xiao_xiuxian_auto.cultivate.asyncio.sleep", no_sleep):
+            await plugin.cultivate.on_official_text(key, "气血: 80/100", send_cb)
+
+        restored = await plugin.cultivate._get(key)
+        self.assertEqual("", restored.mode)
+        self.assertFalse(restored.is_resting)
+        self.assertIn("@3889001741 探索秘境", plugin._official_messages)
+
     async def test_activity_commands_wait_for_confirmed_exit_when_secluded(self):
         main = _import_main_with_astrbot_stubs()
         key = "10001:20002"
@@ -179,7 +235,7 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cultivate_state.is_resting)
         self.assertTrue(cultivate_state.suspended_for_activity)
 
-    async def test_low_hp_recovery_blocks_all_activity_commands_until_hp_recovers(self):
+    async def test_low_hp_does_not_block_bounty_or_sect(self):
         main = _import_main_with_astrbot_stubs()
         key = "10001:20002"
         now = time.time()
@@ -201,41 +257,13 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         send_cb = plugin._make_send_cb(key)
         await plugin.bounty.tick(key, send_cb)
-        await plugin.secret.tick(key, send_cb)
         await plugin.sect.tick(key, send_cb)
 
-        activity_messages = [
-            msg
-            for msg in plugin._official_messages
-            if any(word in msg for word in ("悬赏令", "探索秘境", "宗门任务"))
-        ]
-        pending = plugin.cultivate._pending_after_exit.get(key, [])
+        self.assertIn("@3889001741 悬赏令查看", plugin._official_messages)
+        self.assertIn("@3889001741 宗门任务接取", plugin._official_messages)
+        self.assertNotIn("@3889001741 我的状态", plugin._official_messages)
 
-        self.assertEqual([], activity_messages)
-        self.assertEqual(1, sum(msg.endswith("闭关") for msg in plugin._official_messages), plugin._official_messages)
-        self.assertTrue(any("悬赏令查看" in msg for msg in pending), pending)
-        self.assertTrue(any("探索秘境" in msg for msg in pending), pending)
-        self.assertTrue(any("宗门任务接取" in msg for msg in pending), pending)
-        cultivate_state = await plugin.cultivate._get(key)
-        self.assertTrue(cultivate_state.is_resting)
-        self.assertFalse(cultivate_state.suspended_for_activity)
-        rest_started_at = cultivate_state.last_action_ts
-
-        bounty_state = await plugin.bounty._get(key)
-        bounty_state.last_action_ts = time.time() - 301
-        await plugin.bounty._set(key, bounty_state)
-        await plugin.bounty.tick(key, send_cb)
-
-        activity_messages = [
-            msg
-            for msg in plugin._official_messages
-            if any(word in msg for word in ("悬赏令", "探索秘境", "宗门任务"))
-        ]
-        cultivate_state = await plugin.cultivate._get(key)
-        self.assertEqual([], activity_messages)
-        self.assertEqual(rest_started_at, cultivate_state.last_action_ts)
-
-    async def test_stale_hp_check_blocks_all_activity_commands_until_status_reply(self):
+    async def test_stale_hp_check_blocks_only_secret_entry(self):
         main = _import_main_with_astrbot_stubs()
         key = "10001:20002"
         now = time.time()
@@ -260,19 +288,16 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await plugin.secret.tick(key, send_cb)
         await plugin.sect.tick(key, send_cb)
 
-        activity_messages = [
-            msg
-            for msg in plugin._official_messages
-            if any(word in msg for word in ("悬赏令", "探索秘境", "宗门任务"))
-        ]
+        activity_messages = [msg for msg in plugin._official_messages if any(word in msg for word in ("悬赏令", "探索秘境", "宗门任务"))]
         status_messages = [msg for msg in plugin._official_messages if msg.endswith("我的状态")]
         pending = plugin.cultivate._pending_after_exit.get(key, [])
 
-        self.assertEqual([], activity_messages)
+        self.assertEqual(
+            ["@3889001741 悬赏令查看", "@3889001741 宗门任务接取"],
+            activity_messages,
+        )
         self.assertEqual(1, len(status_messages), plugin._official_messages)
-        self.assertTrue(any("悬赏令查看" in msg for msg in pending), pending)
         self.assertTrue(any("探索秘境" in msg for msg in pending), pending)
-        self.assertTrue(any("宗门任务接取" in msg for msg in pending), pending)
 
     async def test_stale_hp_high_reply_replays_all_pending_activity_commands(self):
         main = _import_main_with_astrbot_stubs()
@@ -516,186 +541,35 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await second_task
 
-    async def test_stale_hp_low_reply_enters_recovery_without_waiting_for_activity_timeout(self):
+    async def test_secret_hp_recovery_restores_each_existing_cultivate_mode(self):
         main = _import_main_with_astrbot_stubs()
-        key = "10001:20002"
-        now = time.time()
-        plugin = _make_plugin_shell(main)
-
-        await plugin.cultivate._set(
-            key,
-            CultivateState(
-                mode=MODE_SECLUSION,
-                is_resting=False,
-                hp_percent=100.0,
-                hp_check_ts=now - 120,
-                last_action_ts=now - 60,
-            ),
-        )
-        await plugin.bounty._set(key, BountyState(enabled=True, phase="SLEEPING", wake_at_ts=now - 1))
-        await plugin.secret._set(key, SecretState(enabled=True, phase="SLEEPING", wake_at_ts=now - 1))
-        await plugin.sect._set(key, SectState(enabled=True, phase="SLEEPING", wake_at_ts=now - 1))
-
-        send_cb = plugin._make_send_cb(key)
-        await plugin.bounty.tick(key, send_cb)
-        await plugin.secret.tick(key, send_cb)
-        await plugin.sect.tick(key, send_cb)
-        await plugin.cultivate.on_official_text(key, "气血: 20/100", send_cb)
-
-        activity_messages = [
-            msg
-            for msg in plugin._official_messages
-            if any(word in msg for word in ("悬赏令", "探索秘境", "宗门任务"))
-        ]
-        pending = plugin.cultivate._pending_after_exit.get(key, [])
-        cultivate_state = await plugin.cultivate._get(key)
-
-        self.assertEqual([], activity_messages)
-        self.assertEqual(1, sum(msg.endswith("闭关") for msg in plugin._official_messages), plugin._official_messages)
-        self.assertTrue(cultivate_state.is_resting)
-        self.assertFalse(cultivate_state.suspended_for_activity)
-        self.assertTrue(any("悬赏令查看" in msg for msg in pending), pending)
-        self.assertTrue(any("探索秘境" in msg for msg in pending), pending)
-        self.assertTrue(any("宗门任务接取" in msg for msg in pending), pending)
-
-    async def test_low_hp_without_recovery_mode_replays_pending_instead_of_deadlocking(self):
-        main = _import_main_with_astrbot_stubs()
-        key = "10001:20002"
-        now = time.time()
-        plugin = _make_plugin_shell(main)
-
-        await plugin.cultivate._set(
-            key,
-            CultivateState(
-                mode="",
-                is_resting=False,
-                hp_percent=100.0,
-                hp_check_ts=now - 120,
-                last_action_ts=now - 60,
-            ),
-        )
-        await plugin.bounty._set(key, BountyState(enabled=True, phase="SLEEPING", wake_at_ts=now - 1))
-        await plugin.secret._set(key, SecretState(enabled=True, phase="SLEEPING", wake_at_ts=now - 1))
-        await plugin.sect._set(key, SectState(enabled=True, phase="SLEEPING", wake_at_ts=now - 1))
-
-        send_cb = plugin._make_send_cb(key)
-        await plugin.bounty.tick(key, send_cb)
-        await plugin.secret.tick(key, send_cb)
-        await plugin.sect.tick(key, send_cb)
+        recovery_modes = ("", MODE_CULTIVATE, MODE_SECLUSION, MODE_SECT_SECLUSION)
 
         async def no_sleep(_delay):
             return None
 
-        with patch("astrbot_plugin_xiao_xiuxian_auto.cultivate.asyncio.sleep", no_sleep):
-            await plugin.cultivate.on_official_text(key, "气血: 20/100", send_cb)
-
-        self.assertTrue(any("悬赏令查看" in msg for msg in plugin._official_messages), plugin._official_messages)
-        self.assertTrue(any("探索秘境" in msg for msg in plugin._official_messages), plugin._official_messages)
-        self.assertTrue(any("宗门任务接取" in msg for msg in plugin._official_messages), plugin._official_messages)
-        self.assertEqual([], plugin.cultivate._pending_after_exit.get(key, []))
-
-    async def test_low_hp_recovery_modes_send_one_recovery_command_and_dedupe_pending(self):
-        main = _import_main_with_astrbot_stubs()
-        recovery_modes = (
-            (MODE_CULTIVATE, "修炼"),
-            (MODE_SECLUSION, "闭关"),
-            (MODE_SECT_SECLUSION, "宗门闭关"),
-        )
-
-        for mode, command in recovery_modes:
-            with self.subTest(mode=mode):
-                key = f"10001:{20000 + len(command)}"
-                now = time.time()
+        for mode in recovery_modes:
+            with self.subTest(mode=mode or "空闲"):
+                key = f"10001:{22000 + len(mode)}"
                 plugin = _make_plugin_shell(main)
+                send_cb = plugin._make_send_cb(key)
                 await plugin.cultivate._set(
                     key,
-                    CultivateState(
-                        mode=mode,
-                        is_resting=False,
-                        hp_percent=20.0,
-                        hp_check_ts=now,
-                        last_action_ts=now - 60,
-                    ),
+                    CultivateState(mode=mode, hp_percent=20.0, hp_check_ts=time.time()),
                 )
-                send_cb = plugin._make_send_cb(key)
-                activity_commands = (
-                    f"@3889001741 悬赏令查看",
-                    f"@3889001741 探索秘境",
-                    f"@3889001741 宗门任务接取",
-                )
+                plugin.cultivate.queue_pending(key, "@3889001741 探索秘境")
 
-                for _ in range(2):
-                    for activity_command in activity_commands:
-                        await send_cb(activity_command)
-
-                activity_messages = [
-                    msg
-                    for msg in plugin._official_messages
-                    if any(word in msg for word in ("悬赏令", "探索秘境", "宗门任务"))
-                ]
-                recovery_messages = [msg for msg in plugin._official_messages if msg.endswith(command)]
-                pending = plugin.cultivate._pending_after_exit.get(key, [])
-                cultivate_state = await plugin.cultivate._get(key)
-
-                self.assertEqual([], activity_messages)
-                self.assertEqual(1, len(recovery_messages), plugin._official_messages)
-                self.assertEqual(3, len(pending), pending)
-                self.assertTrue(cultivate_state.is_resting)
-
-    async def test_recovery_completion_replays_pending_activity_commands_once(self):
-        main = _import_main_with_astrbot_stubs()
-        recovery_modes = (
-            (MODE_CULTIVATE, "本次修炼增加修为"),
-            (MODE_SECLUSION, "闭关结算"),
-            (MODE_SECT_SECLUSION, "闭关结算"),
-        )
-
-        async def no_sleep(_delay):
-            return None
-
-        for mode, completion_text in recovery_modes:
-            with self.subTest(mode=mode):
-                key = f"10001:{21000 + len(mode)}"
-                now = time.time()
-                plugin = _make_plugin_shell(main)
-                await plugin.cultivate._set(
-                    key,
-                    CultivateState(
-                        mode=mode,
-                        is_resting=False,
-                        hp_percent=20.0,
-                        hp_check_ts=now,
-                        last_action_ts=now - 60,
-                    ),
-                )
-                send_cb = plugin._make_send_cb(key)
-                for activity_command in (
-                    f"@3889001741 悬赏令查看",
-                    f"@3889001741 探索秘境",
-                    f"@3889001741 宗门任务接取",
-                ):
-                    await send_cb(activity_command)
-
-                if mode in (MODE_SECLUSION, MODE_SECT_SECLUSION):
-                    st = await plugin.cultivate._get(key)
-                    st.last_action_ts = time.time() - plugin.cultivate.REST_FULL_WAIT_SEC - 1
-                    await plugin.cultivate._set(key, st)
-                    await send_cb("@3889001741 悬赏令查看")
-                    self.assertTrue(
-                        any(msg.endswith("出关") for msg in plugin._official_messages),
-                        plugin._official_messages,
-                    )
+                self.assertFalse(await plugin.cultivate.ensure_secret_entry_hp(key, send_cb))
+                self.assertIn("@3889001741 修炼", plugin._official_messages)
 
                 with patch("astrbot_plugin_xiao_xiuxian_auto.cultivate.asyncio.sleep", no_sleep):
-                    await plugin.cultivate.on_official_text(key, completion_text, send_cb)
+                    await plugin.cultivate.on_official_text(key, "气血: 80/100", send_cb)
 
-                activity_messages = [
-                    msg
-                    for msg in plugin._official_messages
-                    if any(word in msg for word in ("悬赏令", "探索秘境", "宗门任务"))
-                ]
-                self.assertEqual(3, len(activity_messages), plugin._official_messages)
-                self.assertEqual([], plugin.cultivate._pending_after_exit.get(key, []))
+                restored = await plugin.cultivate._get(key)
+                self.assertEqual(mode, restored.mode)
+                self.assertFalse(restored.is_resting)
+                self.assertEqual(bool(mode), restored.suspended_for_activity)
+                self.assertIn("@3889001741 探索秘境", plugin._official_messages)
 
 
 def _import_main_with_astrbot_stubs():

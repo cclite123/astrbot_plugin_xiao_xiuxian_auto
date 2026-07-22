@@ -56,6 +56,9 @@ class CultivateState:
     hp_check_pending: bool = False
     suspended_for_activity: bool = False
     last_action_ts: float = 0.0
+    secret_hp_check_pending: bool = False
+    secret_hp_recovery: bool = False
+    secret_hp_previous_mode: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -248,48 +251,53 @@ class CultivateController:
         st = await self._get(key)
         return st.mode == MODE_CULTIVATE and st.is_resting
 
-    async def ensure_hp(self, key: str, send_cb, min_pct: float = 80.0) -> bool:
-
-
-
-
+    async def ensure_secret_entry_hp(self, key: str, send_cb, min_pct: float = 80.0) -> bool:
+        """仅在进入秘境前检查游戏要求的最低气血。"""
         st = await self._get(key)
         now = time.time()
 
-        if st.mode in (MODE_SECLUSION, MODE_SECT_SECLUSION) and st.is_resting:
-            duration = now - st.last_action_ts if st.last_action_ts else 9999
-            if duration > self.REST_FULL_WAIT_SEC:
-                st.hp_percent = 100.0
-                st.hp_check_ts = now
-            if st.suspended_for_activity or st.hp_percent < min_pct:
-                await self._set(key, st)
-                return False
-            await self._send_exit(st.mode, send_cb)
-            st.suspended_for_activity = True
-            st.last_action_ts = now
-            st.hp_check_ts = 0.0
-            await self._set(key, st)
+        if st.secret_hp_recovery:
             return False
 
         if now - st.hp_check_ts > self.HP_FRESH_SEC:
             await send_cb(f"@{self.official_qq} 我的状态")
             st.hp_check_ts = now
             st.hp_check_pending = True
+            st.secret_hp_check_pending = True
             await self._set(key, st)
             return False
 
         if st.hp_check_pending:
             return False
 
-        if not st.mode:
-            return True
-
         if st.hp_percent >= min_pct:
             return True
 
-        if st.mode and not st.is_resting:
-            await self._enter_rest(key, send_cb)
+        await self._start_secret_hp_recovery(key, st, send_cb)
         return False
+
+    async def _start_secret_hp_recovery(self, key: str, st: CultivateState, send_cb) -> None:
+        st.secret_hp_recovery = True
+        st.secret_hp_previous_mode = st.mode
+        st.mode = MODE_CULTIVATE
+        st.is_resting = False
+        st.suspended_for_activity = True
+        await self._set(key, st)
+        await self._enter_rest(key, send_cb, force=True)
+
+    async def _finish_secret_hp_recovery(self, key: str, st: CultivateState, send_cb) -> None:
+        st.mode = st.secret_hp_previous_mode
+        st.is_resting = False
+        st.suspended_for_activity = bool(st.mode)
+        st.secret_hp_check_pending = False
+        st.secret_hp_recovery = False
+        st.secret_hp_previous_mode = ""
+        await self._set(key, st)
+
+        pendings = self.pop_pending(key)
+        for text in pendings:
+            await asyncio.sleep(1.0)
+            await send_cb(text)
 
 
     async def on_official_text(self, key: str, text: str, send_cb):
@@ -304,23 +312,21 @@ class CultivateController:
             await self._set(key, st)
             self._info(f"[cultivate] {key} 气血更新：{hp:.1f}%")
 
-            if hp < 80.0 and self._pending_after_exit.get(key) and not st.mode:
-                pendings = self.pop_pending(key)
-                for t in pendings:
-                    await asyncio.sleep(1.0)
-                    await send_cb(t)
+            if st.secret_hp_check_pending:
+                st.secret_hp_check_pending = False
+                if hp >= 80.0:
+                    await self._finish_secret_hp_recovery(key, st, send_cb)
+                else:
+                    await self._start_secret_hp_recovery(key, st, send_cb)
                 return
 
-            if hp < 80.0 and self._pending_after_exit.get(key) and st.mode and not st.is_resting:
-                await self._enter_rest(key, send_cb)
+            if st.secret_hp_recovery and hp >= 80.0:
+                await self._finish_secret_hp_recovery(key, st, send_cb)
                 return
 
-
-            if hp >= 80.0:
-                pendings = self.pop_pending(key)
-                for t in pendings:
-                    await asyncio.sleep(1.0)
-                    await send_cb(t)
+            if st.secret_hp_recovery and not st.is_resting:
+                await self._enter_rest(key, send_cb, force=True)
+                return
 
         if not st.mode:
             return
@@ -398,6 +404,14 @@ class CultivateController:
 
 
         if RE_CULTIVATE_DONE.search(text) and st.mode == MODE_CULTIVATE:
+            if st.secret_hp_recovery:
+                st.is_resting = False
+                await self._set(key, st)
+                if st.hp_percent >= 80.0:
+                    await self._finish_secret_hp_recovery(key, st, send_cb)
+                else:
+                    await self._enter_rest(key, send_cb, force=True)
+                return
             st.hp_percent = 100.0
             st.hp_check_ts = time.time()
             st.is_resting = False

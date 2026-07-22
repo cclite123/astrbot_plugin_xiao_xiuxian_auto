@@ -1856,10 +1856,10 @@ class XiaoXiuxianAuto(Star):
             )
             if is_activity_cmd:
                 cultivate = self._controller("cultivate", key)
-                if not await cultivate.ensure_hp(key, _send, min_pct=80.0):
+                if not await cultivate.request_idle(key, _send):
                     cultivate.queue_pending(key, text)
                     return
-                if not await cultivate.request_idle(key, _send):
+                if "探索秘境" in text and not await cultivate.ensure_secret_entry_hp(key, _send, min_pct=80.0):
                     cultivate.queue_pending(key, text)
                     return
 
