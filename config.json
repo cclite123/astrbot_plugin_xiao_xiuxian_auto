@@ -24,7 +24,9 @@
     "post_finish_delay_sec": 30,
     "next_morning_hour": 8,
     "daily_start_time": "08:30",
-    "jitter_seconds": 600
+    "jitter_seconds": 600,
+    "response_timeout_sec": 300,
+    "max_response_retries": 3
   },
   "_comment_secret": "秘境模块配置；控制秘境每日启动时间和随机抖动。",
   "secret": {
@@ -39,12 +41,22 @@
     "default_enabled_tasks": [],
     "_comment_response_timeout_sec": "接取、刷新或完成宗门任务后等待有效回执的超时时间。",
     "response_timeout_sec": 120,
+    "max_response_retries": 3,
     "_comment_task_refresh_delay_sec": "接到非目标任务后等待多久发送“宗门任务刷新”。",
     "task_refresh_delay_sec": 70,
     "_comment_hp_recovery_min_sec": "气血不足时进入恢复状态的最短等待时间。",
     "hp_recovery_min_sec": 180,
     "_comment_hp_recovery_cultivate_count": "在修炼模式下，收到多少次修炼回执后视为气血已恢复。",
     "hp_recovery_cultivate_count": 3
+  },
+  "_comment_captcha": "验证码守卫；验证码出现时暂停本群全部自动指令。",
+  "captcha": {
+    "enabled": true,
+    "vision_api_key": "",
+    "vision_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "vision_model": "",
+    "debug_print": false,
+    "auto_resume": true
   },
   "_comment_coordinator": "任务协调器配置；控制多个任务之间的发送间隔和执行顺序。",
   "coordinator": {

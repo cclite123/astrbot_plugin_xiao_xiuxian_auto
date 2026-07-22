@@ -39,6 +39,7 @@ try:
     from .auto_alchemy_optimizer import AutoAlchemyOptimizer
     from .linjie import LinjieUpgradeController, format_money as format_linjie_money
     from .endless import EndlessTowerController
+    from .captcha_guard import CaptchaGuard
 except ImportError:
     from storage import JsonStore, make_key
     from bounty import BountyController
@@ -52,6 +53,7 @@ except ImportError:
     from auto_alchemy_optimizer import AutoAlchemyOptimizer
     from linjie import LinjieUpgradeController, format_money as format_linjie_money
     from endless import EndlessTowerController
+    from captcha_guard import CaptchaGuard
 
 PLUGIN_NAME = "astrbot_plugin_xiao_xiuxian_auto"
 OFFICIAL_BOT_QQ_DEFAULT = "3889001741"
@@ -543,6 +545,7 @@ class XiaoXiuxianAuto(Star):
         # 配置合并优先级：config.json < AstrBot 注入配置 < Page 覆盖配置
         self.cfg = _deep_merge_dict(_load_local_config(), self._astrbot_config or {})
         self.cfg = _deep_merge_dict(self.cfg, _load_page_override())
+        self._captcha_guards: Dict[str, CaptchaGuard] = {}
 
         self.multi_cfg = dict(self.cfg.get("multi_account", {}) or {})
         self.multi_account_enabled = bool(self.multi_cfg.get("enabled", True))
@@ -591,6 +594,8 @@ class XiaoXiuxianAuto(Star):
             next_morning_hour=int(bcfg.get("next_morning_hour", 8)),
             daily_start_time=bcfg.get("daily_start_time", "08:30"),
             jitter_seconds=int(bcfg.get("jitter_seconds", 600)),
+            response_timeout_sec=int(bcfg.get("response_timeout_sec", 300)),
+            max_response_retries=int(bcfg.get("max_response_retries", 3)),
             logger=logger,
             market_price=self.market_price,
         )
@@ -697,6 +702,19 @@ class XiaoXiuxianAuto(Star):
         override = getattr(self, "_account_config_overrides", {}).get(str(self_id), {})
         return _deep_merge_dict(getattr(self, "cfg", {}), override)
 
+    def _captcha_for_key(self, key: str) -> CaptchaGuard:
+        self_id = self._self_id_from_key(key)
+        guards = getattr(self, "_captcha_guards", None)
+        if guards is None:
+            guards = self._captcha_guards = {}
+        cfg = self._effective_account_config(self_id)
+        if self_id not in guards:
+            guards[self_id] = CaptchaGuard(cfg.get("captcha", {}), logger=logger)
+        else:
+            # 同步 AstrBot 自带配置页或外部热更新写入的最新验证码配置。
+            guards[self_id].configure(cfg.get("captcha", {}))
+        return guards[self_id]
+
     def _account_data_dir(self, self_id: str) -> str:
         safe_id = re.sub(r"[^0-9A-Za-z_-]", "_", str(self_id or "default")) or "default"
         return os.path.join(self.data_dir, "accounts", safe_id)
@@ -728,6 +746,8 @@ class XiaoXiuxianAuto(Star):
             next_morning_hour=int(bcfg.get("next_morning_hour", 8)),
             daily_start_time=bcfg.get("daily_start_time", "08:30"),
             jitter_seconds=int(bcfg.get("jitter_seconds", 600)),
+            response_timeout_sec=int(bcfg.get("response_timeout_sec", 300)),
+            max_response_retries=int(bcfg.get("max_response_retries", 3)),
             logger=logger,
             market_price=self.market_price,
         )
@@ -825,6 +845,7 @@ class XiaoXiuxianAuto(Star):
             self._send_tasks.pop(key, None)
         self._account_config_overrides = _load_account_overrides()
         self._account_controllers[sid] = self._build_account_controllers(sid)
+        getattr(self, "_captcha_guards", {}).pop(sid, None)
 
     async def reload_config(self) -> None:
         async with self._reload_lock:
@@ -1640,6 +1661,8 @@ class XiaoXiuxianAuto(Star):
             action_ts=endless_st.next_action_ts,
             wake_ts=endless_st.wake_at_ts,
         )
+        captcha_pause = self._captcha_for_key(key).status(key)
+        captcha_next = f"⏸️暂停：{captcha_pause.reason}" if captcha_pause.active else "✅正常"
 
         return ("📊 【任务状态总览】\n"
                 f"🎯 悬赏：{bounty_next}\n"
@@ -1651,6 +1674,7 @@ class XiaoXiuxianAuto(Star):
                 f"🌾 灵田：{routine_line('灵田', routine_st.farm_enabled, routine_st.farm_phase, routine_st.farm_action_ts, routine_st.farm_wake_ts).split('：',1)[1]}\n"
                 f"🏔️ 灵界升级：{linjie.summary_line(linjie_st)}\n"
                 f"🗼 无尽妖塔：{endless_next}，进度 {endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'}\n"
+                f"🧩 验证码守卫：{captcha_next}\n"
                 f"🧘 修炼/闭关：{cult_next}")
 
 
@@ -2214,6 +2238,9 @@ class XiaoXiuxianAuto(Star):
 
         try:
             while True:
+                if self._captcha_for_key(key).is_paused(key):
+                    await asyncio.sleep(0.5)
+                    continue
                 lock = self._send_locks.setdefault(key, asyncio.Lock())
                 async with lock:
                     snapshot = list(self._send_queues.get(key, []))
@@ -2269,6 +2296,23 @@ class XiaoXiuxianAuto(Star):
                 elif has_more and (self._send_tasks.get(key) is current):
                     self._send_tasks[key] = asyncio.create_task(self._send_worker(key))
 
+    async def _handle_captcha(self, key: str, event, raw_text: str) -> bool:
+        guard = self._captcha_for_key(key)
+
+        async def notify(message: str) -> None:
+            await self._raw_send_by_key(key, message)
+
+        async def click(payload: Dict[str, str]) -> None:
+            self_id = self._self_id_from_key(key)
+            client = self._find_client_by_self_id(self_id)
+            if client is None:
+                raise RuntimeError("未找到 OneBot 客户端")
+            result = await self._do_send_action(client, "click_inline_keyboard_button", payload)
+            if result is not True:
+                raise RuntimeError(str(result))
+
+        return await guard.handle(key, event, raw_text, self._self_id_from_key(key), notify, click)
+
     async def _raw_send_by_key(self, key: str, text: str) -> None:
 
         key = str(key)
@@ -2290,6 +2334,17 @@ class XiaoXiuxianAuto(Star):
             await self._mark_send_blocked(key, result)
         elif result:
             logger.warning(f"[xiao_xiuxian_auto] 发送消息失败: {result}")
+
+    async def _do_send_action(self, client, action: str, payload: Dict[str, Any]):
+        for target in (getattr(client, "call_action", None), getattr(getattr(client, "api", None), "call_action", None)):
+            if target is None:
+                continue
+            try:
+                await target(action, **payload)
+                return True
+            except Exception as exc:
+                last_error = exc
+        return locals().get("last_error", RuntimeError("没有可用的 OneBot action 接口"))
 
     async def _do_send(self, client, group_id, payload):
         group_id = str(group_id)
@@ -2612,6 +2667,12 @@ class XiaoXiuxianAuto(Star):
                 reply = await self.cmd_set_price_center_key(text.replace("设置价格中心密钥", "", 1).strip())
             elif text.startswith("设置计算中心密钥"):
                 reply = await self.cmd_set_price_center_key(text.replace("设置计算中心密钥", "", 1).strip())
+            elif text == "继续任务":
+                self._captcha_for_key(key).resume(key)
+                reply = "▶️ 已解除验证码暂停，自动任务将按原队列继续。"
+            elif text == "验证码状态":
+                pause = self._captcha_for_key(key).status(key)
+                reply = f"验证码守卫：{'⏸️暂停' if pause.active else '✅正常'}\n原因：{pause.reason or '无'}"
             elif text in ("任务状态", "修仙状态"): reply = await self.cmd_task_status(key)
             elif text in ("悬赏修为", "悬赏价值", "悬赏耗时"):
                 reply = await self.bounty.cmd_set_strategy(key, text.replace("悬赏", "", 1).strip())
@@ -2637,6 +2698,9 @@ class XiaoXiuxianAuto(Star):
             key = f"{self_id}:{group_id}"
             self._known_keys.add(key)
             send_cb = self._make_send_cb(key)
+
+            if await self._handle_captcha(key, event, raw_text):
+                return
 
             handled_auto_alchemy = await self.auto_alchemy.on_official_text(key, raw_text, send_cb)
             handled_inventory = False
@@ -2676,7 +2740,7 @@ class XiaoXiuxianAuto(Star):
         gid = getattr(event.message_obj, "group_id", None)
         return f"{sid}:{gid}" if gid else f"{sid}:private:{event.get_sender_id()}"
 
-    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启悬赏|关闭悬赏|悬赏(修为|价值|耗时)|统计|开启秘境|关闭秘境|开启签到|关闭签到|开启领丹|关闭领丹|开启挖矿|关闭挖矿|开启灵田|关闭灵田|开启宗门任务|关闭宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启修炼|关闭修炼|开启闭关|关闭闭关|开启宗门闭关|关闭宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启炼丹|开启背包炼丹|炼丹 .+|暂停炼丹|继续炼丹|关闭炼丹|炼丹状态|开启购买药材(?:\s+\d+)?|关闭购买药材|开启动态购买|关闭动态购买|开启灵界升级|关闭灵界升级|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|灵界规划序列|开启真元检测|关闭真元检测|设置真元检测.*|开启无尽(?:\s+\d+)?|关闭无尽|无尽状态|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|任务状态|修仙状态|修仙菜单.*)$")
+    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启悬赏|关闭悬赏|悬赏(修为|价值|耗时)|统计|开启秘境|关闭秘境|开启签到|关闭签到|开启领丹|关闭领丹|开启挖矿|关闭挖矿|开启灵田|关闭灵田|开启宗门任务|关闭宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启修炼|关闭修炼|开启闭关|关闭闭关|开启宗门闭关|关闭宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启炼丹|开启背包炼丹|炼丹 .+|暂停炼丹|继续炼丹|关闭炼丹|炼丹状态|开启购买药材(?:\s+\d+)?|关闭购买药材|开启动态购买|关闭动态购买|开启灵界升级|关闭灵界升级|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|灵界规划序列|开启真元检测|关闭真元检测|设置真元检测.*|开启无尽(?:\s+\d+)?|关闭无尽|无尽状态|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|继续任务|验证码状态|任务状态|修仙状态|修仙菜单.*)$")
     async def on_self_command(self, event: AstrMessageEvent):
 
 
@@ -2824,6 +2888,12 @@ class XiaoXiuxianAuto(Star):
             reply = await self.cmd_set_price_center_key(text.replace("设置价格中心密钥", "", 1).strip())
         elif text.startswith("设置计算中心密钥"):
             reply = await self.cmd_set_price_center_key(text.replace("设置计算中心密钥", "", 1).strip())
+        elif text == "继续任务":
+            self._captcha_for_key(key).resume(key)
+            reply = "▶️ 已解除验证码暂停，自动任务将按原队列继续。"
+        elif text == "验证码状态":
+            pause = self._captcha_for_key(key).status(key)
+            reply = f"验证码守卫：{'⏸️暂停' if pause.active else '✅正常'}\n原因：{pause.reason or '无'}"
         elif text in ("任务状态", "修仙状态"): reply = await self.cmd_task_status(key)
         elif text in ("悬赏修为", "悬赏价值", "悬赏耗时"):
             reply = await self.bounty.cmd_set_strategy(key, text.replace("悬赏", "", 1).strip())
@@ -2850,6 +2920,9 @@ class XiaoXiuxianAuto(Star):
         key = self._key_of_astr_event(event)
         self._known_keys.add(key)
         send_cb = self._make_send_cb(key)
+
+        if await self._handle_captcha(key, event, raw_text):
+            return
 
         handled_auto_alchemy = await self.auto_alchemy.on_official_text(key, raw_text, send_cb)
         handled_inventory = False

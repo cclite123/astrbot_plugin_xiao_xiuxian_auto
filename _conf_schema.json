@@ -1,4 +1,17 @@
 {
+  "captcha": {
+    "description": "全局验证码守卫",
+    "type": "object",
+    "hint": "验证码出现时暂停本群所有自动指令，使用视觉模型识别并点击后自动恢复。",
+    "items": {
+      "enabled": {"description": "启用验证码守卫", "type": "bool", "default": true},
+      "vision_api_key": {"description": "视觉模型 API Key", "type": "string", "default": ""},
+      "vision_base_url": {"description": "视觉模型 Base URL", "type": "string", "default": "https://ark.cn-beijing.volces.com/api/v3"},
+      "vision_model": {"description": "视觉模型 ID", "type": "string", "default": ""},
+      "debug_print": {"description": "验证码调试日志", "type": "bool", "default": false},
+      "auto_resume": {"description": "点击成功后自动恢复", "type": "bool", "default": true}
+    }
+  },
   "bounty": {
     "description": "悬赏模块配置",
     "type": "object",
@@ -37,6 +50,16 @@
         "type": "int",
         "hint": "在每日启动时间基础上随机延迟 0~N 秒，避免固定时间触发。",
         "default": 600
+      },
+      "response_timeout_sec": {
+        "description": "回执超时（秒）",
+        "type": "int",
+        "default": 300
+      },
+      "max_response_retries": {
+        "description": "最大回执重试次数",
+        "type": "int",
+        "default": 3
       }
     }
   },
@@ -79,6 +102,11 @@
         "description": "任务回执超时（秒）",
         "type": "int",
         "default": 120
+      },
+      "max_response_retries": {
+        "description": "最大回执重试次数",
+        "type": "int",
+        "default": 3
       },
       "task_refresh_delay_sec": {
         "description": "非目标任务刷新等待（秒）",

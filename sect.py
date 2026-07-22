@@ -48,6 +48,9 @@ class SectState:
     phase: str = "IDLE"
     wake_at_ts: float = 0.0
     next_action_ts: float = 0.0
+    pending_action: str = ""
+    retry_count: int = 0
+    paused_reason: str = ""
 
     hp_rest_start_ts: float = 0.0
     hp_cultivate_count: int = 0
@@ -90,6 +93,7 @@ class SectController:
         } if isinstance(configured_tasks, list) else set()
         self.default_tasks = {task: task in enabled_tasks for task in TASK_MAP}
         self.response_timeout_sec = max(10, int(self.config.get("response_timeout_sec", 120)))
+        self.max_response_retries = max(1, int(self.config.get("max_response_retries", 3)))
         self.task_refresh_delay_sec = max(1, int(self.config.get("task_refresh_delay_sec", 70)))
         self.hp_recovery_min_sec = max(1, int(self.config.get("hp_recovery_min_sec", 180)))
         self.hp_recovery_cultivate_count = max(
@@ -142,7 +146,10 @@ class SectController:
     async def cmd_enable(self, key: str, send_cb) -> str:
         st = await self._get(key)
         st.enabled = True
-        st.phase = "PROBING"
+        st.phase = "WAITING_RECEIVE"
+        st.pending_action = "receive"
+        st.retry_count = 0
+        st.paused_reason = ""
         st.next_action_ts = time.time() + self.response_timeout_sec
         await self._set(key, st)
         await send_cb(f"@{self.official_qq} 宗门任务接取")
@@ -239,7 +246,7 @@ class SectController:
             return
 
 
-        if RE_SECT_LOW_HP.search(text):
+        if RE_SECT_LOW_HP.search(text) and st.phase in {"WAITING_RECEIVE", "WAITING_COMPLETE", "WAITING_REFRESH"}:
             if st.phase != "WAITING_HP":
                 await self._enter_waiting_hp(key, st, send_cb)
             return
@@ -271,10 +278,12 @@ class SectController:
             return
 
 
-        if RE_SECT_FINISH.search(text):
+        if RE_SECT_FINISH.search(text) and st.phase == "WAITING_COMPLETE":
 
 
-            st.phase = "PROBING"
+            st.phase = "WAITING_RECEIVE"
+            st.pending_action = "receive"
+            st.retry_count = 0
             st.wake_at_ts = 0.0
             st.next_action_ts = time.time() + self.response_timeout_sec
             await self._set(key, st)
@@ -289,17 +298,20 @@ class SectController:
                 found_task = short_name
                 break
 
-        if found_task:
+        if found_task and st.phase in {"WAITING_RECEIVE", "WAITING_REFRESH"}:
             if st.tasks.get(found_task, False):
 
-                st.phase = "WORKING"
+                st.phase = "WAITING_COMPLETE"
+                st.pending_action = "complete"
+                st.retry_count = 0
                 st.next_action_ts = time.time() + self.response_timeout_sec
                 await self._set(key, st)
                 self._info(f"[sect] {key} 命中目标「{found_task}」，正在完成")
                 await send_cb(f"@{self.official_qq} 宗门任务完成")
             else:
 
-                st.phase = "WAITING_REFRESH"
+                st.phase = "WAITING_REFRESH_DELAY"
+                st.pending_action = ""
                 st.next_action_ts = time.time() + self.task_refresh_delay_sec
                 await self._set(key, st)
                 self._info(f"[sect] {key} 任务「{found_task}」未开启，70s后刷新")
@@ -318,7 +330,9 @@ class SectController:
             if st.next_action_ts and now >= st.next_action_ts:
                 if await self._is_hp_recovered(key, st):
 
-                    st.phase = "PROBING"
+                    st.phase = "WAITING_RECEIVE"
+                    st.pending_action = "receive"
+                    st.retry_count = 0
                     st.hp_rest_start_ts = 0.0
                     st.hp_cultivate_count = 0
                     st.next_action_ts = now + 120
@@ -340,7 +354,9 @@ class SectController:
 
         if st.phase == "SLEEPING":
             if st.wake_at_ts and now >= st.wake_at_ts:
-                st.phase = "PROBING"
+                st.phase = "WAITING_RECEIVE"
+                st.pending_action = "receive"
+                st.retry_count = 0
                 st.wake_at_ts = 0.0
                 st.next_action_ts = now + self.response_timeout_sec
                 updated = True
@@ -348,20 +364,31 @@ class SectController:
                 await send_cb("⏰ 已到宗门任务时间，正在接取宗门任务。")
                 await send_cb(f"@{self.official_qq} 宗门任务接取")
 
-        elif st.phase == "WAITING_REFRESH":
+        elif st.phase == "WAITING_REFRESH_DELAY":
             if st.next_action_ts and now >= st.next_action_ts:
-                st.phase = "REFRESHING"
+                st.phase = "WAITING_REFRESH"
+                st.pending_action = "refresh"
+                st.retry_count = 0
                 st.next_action_ts = now + self.response_timeout_sec
                 updated = True
                 await send_cb(f"@{self.official_qq} 宗门任务刷新")
 
 
-        elif st.phase in ("PROBING", "REFRESHING", "WORKING"):
+        elif st.phase in {"WAITING_RECEIVE", "WAITING_REFRESH", "WAITING_COMPLETE"}:
             if st.next_action_ts and now >= st.next_action_ts:
-                st.phase = "PROBING"
-                st.next_action_ts = now + self.response_timeout_sec
+                commands = {
+                    "receive": "宗门任务接取",
+                    "refresh": "宗门任务刷新",
+                    "complete": "宗门任务完成",
+                }
+                if st.retry_count >= self.max_response_retries:
+                    st.phase = "PAUSED"
+                    st.paused_reason = f"{st.pending_action} 连续 {st.retry_count} 次未收到回执"
+                else:
+                    st.retry_count += 1
+                    st.next_action_ts = now + self.response_timeout_sec
+                    await send_cb(f"@{self.official_qq} {commands[st.pending_action]}")
                 updated = True
-                await send_cb(f"@{self.official_qq} 宗门任务接取")
 
         if updated:
             await self._set(key, st)

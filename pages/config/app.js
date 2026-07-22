@@ -86,6 +86,37 @@ function setConfig(path, val) {
   cur[path[path.length - 1]] = val;
 }
 
+// Page 容器中输入框失焦时不一定会触发 change；保存前从 DOM 再采集一次，避免提交旧配置。
+function syncFormToConfig() {
+  formEl.querySelectorAll('.field[data-path]').forEach(wrap => {
+    // object 字段只是分组容器，真正的值由其子字段提供。
+    if (wrap.querySelector('.field[data-path]')) return;
+    const path = String(wrap.dataset.path || '').split('.').filter(Boolean);
+    if (!path.length) return;
+    const checkbox = wrap.querySelector('input[type="checkbox"]');
+    if (checkbox) {
+      setConfig(path, checkbox.checked);
+      return;
+    }
+    const control = wrap.querySelector('select, textarea, input');
+    if (!control) return;
+    if (control.tagName === 'SELECT') {
+      setConfig(path, control.value);
+    } else if (control.tagName === 'TEXTAREA') {
+      const values = control.value
+        .split(/[\n,，、]/)
+        .map(v => v.trim())
+        .filter(Boolean);
+      setConfig(path, values);
+    } else if (control.type === 'number') {
+      const value = Number(control.value);
+      setConfig(path, Number.isFinite(value) ? value : 0);
+    } else {
+      setConfig(path, control.value);
+    }
+  });
+}
+
 function renderField(key, item, value, path) {
   const wrap = document.createElement('div');
   wrap.className = 'field';
@@ -329,20 +360,19 @@ searchEl.addEventListener('input', () => {
 
 saveBtn.addEventListener('click', async () => {
   if (!currentAccount) return;
-  if (!confirm(`保存会中断该账号正在进行的任务，其他账号不受影响。\n\n确认保存账号 ${currentAccount}？`)) return;
   const selfId = currentAccount;
   saveBtn.disabled = true;
   accountSelectEl.disabled = true;
   saveBtn.textContent = '保存中…';
   try {
+    syncFormToConfig();
     const res = await bridge.apiPost('config/save', { self_id: selfId, config });
-    if (res && res.reloaded) {
-      toast('✅ 当前账号配置已保存', true);
-      statusLine.textContent = `账号 ${selfId} 的配置已生效，其他账号未重载。`;
-    } else {
-      toast('⚠️ 已保存，但热重载未完成', false);
-      statusLine.textContent = '配置已写入，请手动重载插件使其完全生效。';
-    }
+    if (!res || res.ok === false) throw new Error((res && res.error) || '服务未确认保存结果');
+    const reloaded = !!res.reloaded;
+    toast(reloaded ? '✅ 当前账号配置已保存并生效' : '✅ 当前账号配置已保存', true);
+    statusLine.textContent = reloaded
+      ? `账号 ${selfId} 的配置已保存并生效，其他账号未重载。`
+      : `账号 ${selfId} 的配置已保存，等待下次热重载生效。`;
   } catch (e) {
     toast('❌ 保存失败：' + (e && e.message ? e.message : e), false);
   } finally {

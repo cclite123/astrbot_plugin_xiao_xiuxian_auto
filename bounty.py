@@ -73,7 +73,11 @@ class BountyState:
     last_action_ts: float = 0.0
     settle_at_ts: float = 0.0
     current_title: str = ""
+    selected_index: int = 0
     wake_at_ts: float = 0.0
+    pending_action: str = ""
+    retry_count: int = 0
+    paused_reason: str = ""
     stats: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -157,13 +161,16 @@ class BountyController:
     def __init__(self, store: JsonStore, official_qq: str, default_strategy: str = "修为",
                  retry_when_running_sec: int = 30, post_finish_delay_sec: int = 30,
                  next_morning_hour: int = 8, daily_start_time: str = "08:30",
-                 jitter_seconds: int = 600, logger=None, market_price=None):
+                 jitter_seconds: int = 600, response_timeout_sec: int = 300,
+                 max_response_retries: int = 3, logger=None, market_price=None):
         self.store = store
         self.official_qq = official_qq
         self.default_strategy = default_strategy
         self.retry_when_running_sec = retry_when_running_sec
         self.post_finish_delay_sec = post_finish_delay_sec
         self.next_morning_hour = next_morning_hour
+        self.response_timeout_sec = max(10, int(response_timeout_sec))
+        self.max_response_retries = max(1, int(max_response_retries))
 
 
         self.market_price = market_price
@@ -272,7 +279,10 @@ class BountyController:
 
         st = await self._get(key)
         st.enabled = True
-        st.phase = "PROBING"
+        st.phase = "WAITING_QUERY"
+        st.pending_action = "query"
+        st.retry_count = 0
+        st.paused_reason = ""
         st.wake_at_ts = 0.0
         st.last_action_ts = time.time()
         await self._set(key, st)
@@ -338,15 +348,17 @@ class BountyController:
             return
 
 
-        if RE_NO_TASK.search(text):
-            st.phase = "REFRESHING"
+        if RE_NO_TASK.search(text) and st.phase in {"WAITING_QUERY", "WAITING_REFRESH"}:
+            st.phase = "WAITING_REFRESH"
+            st.pending_action = "refresh"
+            st.retry_count = 0
             st.last_action_ts = time.time()
             await self._set(key, st)
             await send_cb(f"@{self.official_qq} 悬赏令刷新")
             return
 
 
-        if RE_LIST_HEADER.search(text):
+        if RE_LIST_HEADER.search(text) and st.phase in {"WAITING_QUERY", "WAITING_REFRESH"}:
             opts = parse_options(text)
             if len(opts) < 1:
                 self._warn(f"[bounty-debug] 解析选项失败: {text[:100]}")
@@ -354,8 +366,11 @@ class BountyController:
             chosen = await self.choose_option_dynamic(opts, st.strategy or self.default_strategy)
             if not chosen:
                 return
-            st.phase = "CHOOSING"
+            st.phase = "WAITING_ACCEPT"
+            st.pending_action = "accept"
+            st.retry_count = 0
             st.current_title = chosen.title
+            st.selected_index = chosen.index
             await self._set(key, st)
 
             if any(s in (chosen.extra or "") or s in (chosen.title or "") for s in PRIORITY_SPECIAL_ITEMS):
@@ -366,9 +381,11 @@ class BountyController:
 
 
         m_accept = RE_ACCEPT_OK.search(text)
-        if m_accept:
+        if m_accept and st.phase == "WAITING_ACCEPT":
             minutes = float(m_accept.group("min"))
             st.phase = "WORKING"
+            st.pending_action = ""
+            st.retry_count = 0
             st.current_title = m_accept.group("title").strip()
             st.settle_at_ts = time.time() + minutes * 60 + self.post_finish_delay_sec
             await self._set(key, st)
@@ -380,7 +397,7 @@ class BountyController:
             return
 
 
-        if RE_DONE.search(text):
+        if RE_DONE.search(text) and st.phase == "WAITING_SETTLE":
             today = self._now_beijing().strftime("%Y-%m-%d")
             exp_match = RE_REWARD_EXP.search(text)
             extra_match = RE_REWARD_EXTRA.search(text)
@@ -395,7 +412,9 @@ class BountyController:
 
 
 
-            st.phase = "QUERYING"
+            st.phase = "WAITING_QUERY"
+            st.pending_action = "query"
+            st.retry_count = 0
             st.current_title = ""
             st.settle_at_ts = 0.0
             st.last_action_ts = time.time()
@@ -406,8 +425,10 @@ class BountyController:
             return
 
 
-        if RE_RUNNING.search(text):
+        if RE_RUNNING.search(text) and st.phase in {"WAITING_QUERY", "WAITING_SETTLE"}:
             st.phase = "WORKING"
+            st.pending_action = ""
+            st.retry_count = 0
             st.settle_at_ts = time.time() + self.retry_when_running_sec
             await self._set(key, st)
             if send_cb:
@@ -424,7 +445,9 @@ class BountyController:
 
         if st.phase == "SLEEPING":
             if st.wake_at_ts and now >= st.wake_at_ts:
-                st.phase = "QUERYING"
+                st.phase = "WAITING_QUERY"
+                st.pending_action = "query"
+                st.retry_count = 0
                 st.wake_at_ts = 0.0
                 st.last_action_ts = now
                 await self._set(key, st)
@@ -434,15 +457,35 @@ class BountyController:
 
 
         if st.phase == "WORKING" and st.settle_at_ts and now >= st.settle_at_ts:
-            st.phase = "SETTLING"
+            st.phase = "WAITING_SETTLE"
+            st.pending_action = "settle"
+            st.retry_count = 0
             st.settle_at_ts = 0.0
             await self._set(key, st)
             await send_cb(f"@{self.official_qq} 悬赏令结算")
             return
 
 
-        if st.phase in ("PROBING", "QUERYING", "REFRESHING", "CHOOSING") \
-                and st.last_action_ts and (now - st.last_action_ts) > 300:
-            st.last_action_ts = now
+        legacy_actions = {"PROBING": "query", "QUERYING": "query", "REFRESHING": "refresh", "CHOOSING": "accept", "SETTLING": "settle"}
+        if st.phase in legacy_actions:
+            st.pending_action = legacy_actions[st.phase]
+            st.phase = f"WAITING_{st.pending_action.upper()}"
+            st.retry_count = 0
             await self._set(key, st)
-            await send_cb(f"@{self.official_qq} 悬赏令查看")
+
+        if st.phase.startswith("WAITING_") and st.pending_action and st.last_action_ts and now - st.last_action_ts > self.response_timeout_sec:
+            commands = {
+                "query": "悬赏令查看", "refresh": "悬赏令刷新",
+                "accept": f"悬赏令接取{st.selected_index}", "settle": "悬赏令结算",
+            }
+            if st.pending_action == "accept" and not st.selected_index:
+                st.phase = "PAUSED"
+                st.paused_reason = "接取悬赏未收到回执，已停止重试"
+            elif st.retry_count >= self.max_response_retries:
+                st.phase = "PAUSED"
+                st.paused_reason = f"{st.pending_action} 连续 {st.retry_count} 次未收到回执"
+            else:
+                st.retry_count += 1
+                st.last_action_ts = now
+                await send_cb(f"@{self.official_qq} {commands[st.pending_action]}")
+            await self._set(key, st)
