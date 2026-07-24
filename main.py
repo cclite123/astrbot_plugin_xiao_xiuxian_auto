@@ -1662,7 +1662,10 @@ class XiaoXiuxianAuto(Star):
             wake_ts=endless_st.wake_at_ts,
         )
         captcha_pause = self._captcha_for_key(key).status(key)
-        captcha_next = f"⏸️暂停：{captcha_pause.reason}" if captcha_pause.active else "✅正常"
+        captcha_next = (
+            f"⏸️暂停：{captcha_pause.reason}\n阶段：{captcha_pause.phase}\n消息序号：{captcha_pause.msg_seq or '无'}"
+            if captcha_pause.active else "✅正常"
+        )
 
         return ("📊 【任务状态总览】\n"
                 f"🎯 悬赏：{bounty_next}\n"
@@ -2672,7 +2675,7 @@ class XiaoXiuxianAuto(Star):
                 reply = "▶️ 已解除验证码暂停，自动任务将按原队列继续。"
             elif text == "验证码状态":
                 pause = self._captcha_for_key(key).status(key)
-                reply = f"验证码守卫：{'⏸️暂停' if pause.active else '✅正常'}\n原因：{pause.reason or '无'}"
+                reply = f"验证码守卫：{'⏸️暂停' if pause.active else '✅正常'}\n原因：{pause.reason or '无'}\n阶段：{pause.phase}\n消息序号：{pause.msg_seq or '无'}"
             elif text in ("任务状态", "修仙状态"): reply = await self.cmd_task_status(key)
             elif text in ("悬赏修为", "悬赏价值", "悬赏耗时"):
                 reply = await self.bounty.cmd_set_strategy(key, text.replace("悬赏", "", 1).strip())
@@ -2893,7 +2896,7 @@ class XiaoXiuxianAuto(Star):
             reply = "▶️ 已解除验证码暂停，自动任务将按原队列继续。"
         elif text == "验证码状态":
             pause = self._captcha_for_key(key).status(key)
-            reply = f"验证码守卫：{'⏸️暂停' if pause.active else '✅正常'}\n原因：{pause.reason or '无'}"
+            reply = f"验证码守卫：{'⏸️暂停' if pause.active else '✅正常'}\n原因：{pause.reason or '无'}\n阶段：{pause.phase}\n消息序号：{pause.msg_seq or '无'}"
         elif text in ("任务状态", "修仙状态"): reply = await self.cmd_task_status(key)
         elif text in ("悬赏修为", "悬赏价值", "悬赏耗时"):
             reply = await self.bounty.cmd_set_strategy(key, text.replace("悬赏", "", 1).strip())

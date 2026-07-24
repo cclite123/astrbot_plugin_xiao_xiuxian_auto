@@ -2,7 +2,7 @@
   "captcha": {
     "description": "全局验证码守卫",
     "type": "object",
-    "hint": "验证码出现时暂停本群所有自动指令，使用视觉模型识别并点击后自动恢复。",
+    "hint": "验证码出现时暂停本群所有自动指令，使用视觉模型识别并提交点击；仅收到官方成功回执后才会恢复。",
     "items": {
       "enabled": {"description": "启用验证码守卫", "type": "bool", "default": true},
       "vision_api_key": {"description": "视觉模型 API Key", "type": "string", "default": ""},

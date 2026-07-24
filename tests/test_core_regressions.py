@@ -45,6 +45,14 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
             main_text,
         )
 
+    def test_captcha_status_exposes_phase_and_message_sequence(self):
+        main_text = (ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertGreaterEqual(main_text.count("阶段：{captcha_pause.phase"), 1)
+        self.assertGreaterEqual(main_text.count("消息序号：{captcha_pause.msg_seq"), 1)
+        self.assertGreaterEqual(main_text.count("阶段：{pause.phase"), 2)
+        self.assertGreaterEqual(main_text.count("消息序号：{pause.msg_seq"), 2)
+
     def test_special_bounty_items_are_individual_priorities(self):
         options = [
             BountyOption(1, "普通任务", 100, 1, 100, "普通奖励"),

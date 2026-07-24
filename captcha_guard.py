@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import re
 import time
 from dataclasses import dataclass
@@ -13,17 +14,28 @@ except ImportError:  # Keep the plugin loadable until the optional dependency is
 
 def is_click_action_accepted(result: Any) -> bool:
     """Return true only when OneBot explicitly reports that the click was accepted."""
+    def is_zero_code(value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return value == 0
+        return isinstance(value, str) and value.strip() == "0"
+
     if result is True:
         return True
     if not isinstance(result, dict) or not result:
         return False
-    codes = [result[name] for name in ("result", "retcode", "status") if name in result]
-    if not codes:
+    numeric_codes = [result[name] for name in ("result", "retcode") if name in result]
+    status = result.get("status")
+    if not numeric_codes and status is None:
         return False
-    try:
-        return all(int(code) == 0 for code in codes)
-    except (TypeError, ValueError):
+    if numeric_codes and not all(is_zero_code(code) for code in numeric_codes):
         return False
+    if status is None:
+        return True
+    if isinstance(status, str) and status.lower() == "ok":
+        return True
+    return is_zero_code(status)
 
 
 @dataclass
@@ -59,11 +71,17 @@ class CaptchaGuard:
     REWARD_SUCCESS_RE = re.compile(r"奖励[0-9]{2,5}灵石")
     SUCCESS_TEXTS = ("不需要验证", "验证码正确", "验证成功", "验证码通过")
     FAILURE_TEXTS = ("验证码不正确", "验证码错误", "验证失败")
+    RECEIPT_PHASES = ("submitting", "awaiting_confirmation")
+    MAX_SEEN_MSG_SEQS = 64
+    CALLBACK_DATA_RE = re.compile(
+        r"(?i)((?:['\"]?callback[_ ]?data['\"]?|callbackdata)\s*[:=]\s*)(?:'[^']*'|\"[^\"]*\"|[^,\s)]+)"
+    )
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, logger=None):
         self.log = logger
         self._pauses: Dict[str, CaptchaPause] = {}
         self._generations: Dict[str, int] = {}
+        self._seen_msg_seqs: Dict[str, OrderedDict[str, None]] = {}
         self._config_signature = None
         self._client = None
         self.configure(config)
@@ -132,8 +150,42 @@ class CaptchaGuard:
 
     def resume(self, key: str) -> None:
         key = str(key)
-        self._generations[key] = self._generations.get(key, 0) + 1
+        self._invalidate_generation(key)
         self._pauses.pop(key, None)
+
+    def _invalidate_generation(self, key: str) -> int:
+        key = str(key)
+        generation = self._generations.get(key, 0) + 1
+        self._generations[key] = generation
+        return generation
+
+    def _is_seen_msg_seq(self, key: str, msg_seq: str) -> bool:
+        return str(msg_seq) in self._seen_msg_seqs.get(str(key), {})
+
+    def _remember_msg_seq(self, key: str, msg_seq: str) -> None:
+        key, msg_seq = str(key), str(msg_seq)
+        seen = self._seen_msg_seqs.setdefault(key, OrderedDict())
+        seen[msg_seq] = None
+        seen.move_to_end(msg_seq)
+        while len(seen) > self.MAX_SEEN_MSG_SEQS:
+            seen.popitem(last=False)
+
+    @classmethod
+    def _redact_text(cls, value: Any) -> str:
+        return cls.CALLBACK_DATA_RE.sub(r"\1<redacted>", str(value))
+
+    @classmethod
+    def _redact_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: "<redacted>" if str(key).replace("_", "").lower() == "callbackdata" else cls._redact_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return type(value)(cls._redact_value(item) for item in value)
+        if isinstance(value, (str, int, float, bool, type(None))):
+            return cls._redact_text(value) if isinstance(value, str) else value
+        return cls._redact_text(value)
 
     def _is_targeted(self, event, raw_text: str, self_id: str) -> bool:
         if getattr(event, "is_at_or_wake_command", False):
@@ -227,13 +279,12 @@ class CaptchaGuard:
             labels,
         )
 
-        current = self.status(key)
-        if current.active and current.msg_seq == challenge.msg_seq:
+        if self._is_seen_msg_seq(key, challenge.msg_seq):
             self._log("info", "[captcha] 忽略重复验证码 key=%s msg_seq=%s", key, challenge.msg_seq)
             return True
 
-        generation = self._generations.get(key, 0) + 1
-        self._generations[key] = generation
+        generation = self._invalidate_generation(key)
+        self._remember_msg_seq(key, challenge.msg_seq)
         self.pause(
             key,
             "检测到验证码，等待识别与点击",
@@ -241,6 +292,8 @@ class CaptchaGuard:
             msg_seq=challenge.msg_seq,
         )
         await notify("⚠️ 检测到验证码，已暂停本群全部自动任务。")
+        if not self._is_current(key, generation, challenge.msg_seq):
+            return True
 
         if AsyncOpenAI is None:
             self.pause(key, "缺少 openai 依赖", phase="configuration_error", msg_seq=challenge.msg_seq)
@@ -303,18 +356,25 @@ class CaptchaGuard:
             safe_payload = dict(payload)
             safe_payload["callback_data"] = "<redacted>"
             self._log("info", "[captcha][CLICK] payload=%r", safe_payload)
+            self.pause(
+                key,
+                "验证码点击已提交，等待 OneBot 响应",
+                phase="submitting",
+                msg_seq=challenge.msg_seq,
+            )
             click_result = await click(payload)
-            self._log("info", "[captcha][CLICK] OneBot 返回=%r", click_result)
+            self._log("info", "[captcha][CLICK] OneBot 返回=%r", self._redact_value(click_result))
         except Exception as exc:
             if self._is_current(key, generation, challenge.msg_seq):
+                safe_error = self._redact_text(exc)
                 self.pause(
                     key,
-                    f"验证码处理失败：{exc}",
+                    f"验证码处理失败：{safe_error}",
                     phase="processing_error",
                     msg_seq=challenge.msg_seq,
                 )
-                await notify(f"⚠️ 验证码处理失败，任务保持暂停：{exc}\n完成验证后发送「继续任务」。")
-                self._log("exception", "[captcha][CAPTCHA] 验证码处理失败 key=%s msg_seq=%s error=%s", key, challenge.msg_seq, exc)
+                await notify(f"⚠️ 验证码处理失败，任务保持暂停：{safe_error}\n完成验证后发送「继续任务」。")
+                self._log("exception", "[captcha][CAPTCHA] 验证码处理失败 key=%s msg_seq=%s error=%s", key, challenge.msg_seq, safe_error)
             return True
 
         if not self._is_current(key, generation, challenge.msg_seq):
@@ -338,7 +398,10 @@ class CaptchaGuard:
         pause = self.status(key)
         if not pause.active:
             return False
+        if pause.phase not in self.RECEIPT_PHASES:
+            return False
         if any(text in raw_text for text in self.FAILURE_TEXTS):
+            self._invalidate_generation(key)
             self.pause(
                 key,
                 "官方返回验证码错误，等待新的验证码或人工恢复",
@@ -356,6 +419,7 @@ class CaptchaGuard:
             self.resume(key)
             await notify("✅ 官方已确认验证通过，已恢复本群自动任务。")
         else:
+            self._invalidate_generation(key)
             self.pause(
                 key,
                 "官方已确认验证通过，等待人工恢复",
@@ -411,19 +475,51 @@ class CaptchaGuard:
         return nodes
 
     def _parse_challenge(self, event) -> Tuple[Optional[CaptchaChallenge], str]:
-        nodes = self._walk_nodes(event)
-        msg_seq = bot_appid = ""
+        message_obj = getattr(event, "message_obj", None)
+        group_id = str(
+            getattr(message_obj, "group_id", "") or getattr(event, "group_id", "")
+            or (event.get("group_id", "") if isinstance(event, dict) else "") or ""
+        )
+        roots = [
+            getattr(message_obj, "raw_message", None),
+            getattr(message_obj, "message", None),
+            getattr(message_obj, "data", None),
+            getattr(event, "raw_message", None),
+            getattr(event, "message", None),
+            getattr(event, "data", None),
+            event if isinstance(event, dict) else None,
+        ]
+        missing = {"group_id"} if not group_id else set()
+        for root in roots:
+            for node in self._walk_nodes(root):
+                keyboard = node.get("keyboard")
+                if keyboard is None:
+                    continue
+                msg_seq = str(
+                    node.get("msgSeq") or node.get("msg_seq") or node.get("messageSeq")
+                    or node.get("message_seq") or node.get("msgId") or node.get("msg_id") or ""
+                )
+                bot_appid = str(
+                    node.get("botAppid") or node.get("bot_appid") or node.get("botAppId")
+                    or node.get("appid") or node.get("app_id") or ""
+                )
+                buttons = self._buttons_from_keyboard(keyboard)
+                candidate_missing = set(missing)
+                if not bot_appid:
+                    candidate_missing.add("bot_appid")
+                if not msg_seq:
+                    candidate_missing.add("msg_seq")
+                if not buttons:
+                    candidate_missing.add("buttons")
+                if not candidate_missing:
+                    return CaptchaChallenge(group_id, bot_appid, msg_seq, tuple(buttons)), ""
+                missing.update(candidate_missing)
+        return None, "缺少 " + ", ".join(sorted(missing or {"keyboard"}))
+
+    def _buttons_from_keyboard(self, keyboard) -> List[CaptchaButton]:
         buttons: List[CaptchaButton] = []
         seen_buttons = set()
-        for node in nodes:
-            msg_seq = msg_seq or str(
-                node.get("msgSeq") or node.get("msg_seq") or node.get("messageSeq")
-                or node.get("message_seq") or node.get("msgId") or node.get("msg_id") or ""
-            )
-            bot_appid = bot_appid or str(
-                node.get("botAppid") or node.get("bot_appid") or node.get("botAppId")
-                or node.get("appid") or node.get("app_id") or ""
-            )
+        for node in self._walk_nodes(keyboard):
             label = str(node.get("label") or node.get("text") or node.get("name") or node.get("title") or "")
             button_id = str(
                 node.get("id") or node.get("buttonId") or node.get("button_id")
@@ -436,28 +532,10 @@ class CaptchaGuard:
             if not label or not button_id or not callback:
                 continue
             identity = (label, button_id, callback)
-            if identity in seen_buttons:
-                continue
-            seen_buttons.add(identity)
-            buttons.append(CaptchaButton(label, button_id, callback))
-
-        message_obj = getattr(event, "message_obj", None)
-        group_id = str(
-            getattr(message_obj, "group_id", "") or getattr(event, "group_id", "")
-            or (event.get("group_id", "") if isinstance(event, dict) else "") or ""
-        )
-        missing = []
-        if not group_id:
-            missing.append("group_id")
-        if not bot_appid:
-            missing.append("bot_appid")
-        if not msg_seq:
-            missing.append("msg_seq")
-        if not buttons:
-            missing.append("buttons")
-        if missing:
-            return None, "缺少 " + ", ".join(missing)
-        return CaptchaChallenge(group_id, bot_appid, msg_seq, tuple(buttons)), ""
+            if identity not in seen_buttons:
+                seen_buttons.add(identity)
+                buttons.append(CaptchaButton(label, button_id, callback))
+        return buttons
 
     @staticmethod
     def _select_button(

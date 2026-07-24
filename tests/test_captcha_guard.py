@@ -86,6 +86,7 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(config["captcha"]["debug_print"])
         self.assertTrue(schema["captcha"]["items"]["debug_print"]["default"])
+        self.assertIn("官方成功回执", schema["captcha"]["hint"])
 
     async def test_debug_log_covers_full_captcha_flow_and_redacts_callback_data(self):
         async def exact_answer(_kwargs):
@@ -164,11 +165,15 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_click_action_accepted({"result": 0, "status": 0}))
         self.assertTrue(is_click_action_accepted({"retcode": 0}))
         self.assertTrue(is_click_action_accepted({"status": 0}))
+        self.assertTrue(is_click_action_accepted({"retcode": 0, "status": "ok"}))
 
         self.assertFalse(is_click_action_accepted(None))
         self.assertFalse(is_click_action_accepted({}))
         self.assertFalse(is_click_action_accepted({"result": 1, "status": 0}))
         self.assertFalse(is_click_action_accepted({"retcode": 1400}))
+        self.assertFalse(is_click_action_accepted({"retcode": 0, "status": "failed"}))
+        self.assertFalse(is_click_action_accepted({"retcode": 0.5}))
+        self.assertFalse(is_click_action_accepted({"status": False}))
         self.assertFalse(is_click_action_accepted(False))
 
     def test_button_payload_reads_nested_current_event_shape(self):
@@ -185,6 +190,34 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
             },
             payload,
         )
+
+    def test_button_payload_does_not_mix_quoted_keyboard_buttons(self):
+        event = make_event(labels=("当前",))
+        event.message_obj.raw_message["reply"] = {
+            "msg_seq": "quoted-seq",
+            "bot_appid": "quoted-app",
+            "keyboard": {
+                "rows": [{"buttons": [{"label": "引用", "button_id": "quoted-button", "data": "quoted-secret"}]}]
+            },
+        }
+
+        payload = CaptchaGuard({"enabled": True})._button_payload(event, "引用")
+
+        self.assertEqual("88", payload["msg_seq"])
+        self.assertEqual("app-1", payload["bot_appid"])
+        self.assertEqual("b-0", payload["button_id"])
+        self.assertEqual("d-0", payload["callback_data"])
+
+    def test_button_payload_reads_current_data_event_shape(self):
+        event = make_event(labels=("数据键盘",))
+        event.data = event.message_obj.raw_message
+        event.message_obj.raw_message = None
+
+        payload = CaptchaGuard({"enabled": True})._button_payload(event, "数据键盘")
+
+        self.assertEqual("88", payload["msg_seq"])
+        self.assertEqual("app-1", payload["bot_appid"])
+        self.assertEqual("b-0", payload["button_id"])
 
     async def test_model_receives_button_labels_and_unmatched_name_falls_back_to_first(self):
         async def answer_with_name(_kwargs):
@@ -275,6 +308,33 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(duplicate)
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertEqual(len(clicks), 1)
+
+    async def test_same_msg_seq_is_not_recognized_again_after_resume(self):
+        async def exact_answer(_kwargs):
+            return "🚗"
+
+        client = FakeVisionClient(exact_answer)
+        clicks = []
+
+        async def click(payload):
+            clicks.append(payload)
+
+        with patch.object(captcha_module, "AsyncOpenAI", return_value=client):
+            guard = CaptchaGuard(
+                {"enabled": True, "vision_api_key": "fixture", "vision_model": "fixture-model"}
+            )
+            key = "10001:20002"
+            raw_captcha = "请点击图中第1个表情 ![captcha](https://qqbot.ugcimg.cn/same-resumed.png)"
+            await guard.handle(key, make_event("same-resumed"), raw_captcha, "10001", noop_notify, click)
+            await guard.handle(key, make_event("receipt"), "验证成功", "10001", noop_notify, click)
+            duplicate = await guard.handle(
+                key, make_event("same-resumed"), raw_captcha, "10001", noop_notify, click
+            )
+
+        self.assertTrue(duplicate)
+        self.assertFalse(guard.is_paused(key))
+        self.assertEqual(1, len(client.chat.completions.calls))
+        self.assertEqual(1, len(clicks))
 
     async def test_stale_visual_result_cannot_click_newer_keyboard(self):
         first_started = asyncio.Event()
@@ -368,6 +428,7 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(guard.is_paused(key))
             self.assertEqual(guard.status(key).phase, "failed")
 
+            guard.pause(key, "等待官方确认", phase="awaiting_confirmation", msg_seq="seq-retry")
             handled_success = await guard.handle(
                 key,
                 make_event("success"),
@@ -379,6 +440,123 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled_success)
         self.assertFalse(guard.is_paused(key))
+
+    async def test_success_receipt_during_recognition_does_not_resume_tasks(self):
+        guard = CaptchaGuard({"enabled": True, "auto_resume": True})
+        key = "10001:20002"
+        guard.pause(key, "检测到验证码，等待识别与点击", phase="recognizing", msg_seq="seq-recognizing")
+
+        handled = await guard.handle(
+            key, make_event("unrelated"), "奖励123灵石", "10001", noop_notify, lambda _payload: None
+        )
+
+        self.assertFalse(handled)
+        self.assertTrue(guard.is_paused(key))
+        self.assertEqual("recognizing", guard.status(key).phase)
+
+    async def test_old_configuration_error_cannot_overwrite_manual_resume_during_notify(self):
+        notify_started = asyncio.Event()
+        release_notify = asyncio.Event()
+
+        async def delayed_notify(_message):
+            notify_started.set()
+            await release_notify.wait()
+
+        guard = CaptchaGuard({"enabled": True})
+        key = "10001:20002"
+        challenge = asyncio.create_task(
+            guard.handle(
+                key,
+                make_event("seq-notify-race"),
+                "请点击图中第1个表情 ![captcha](https://qqbot.ugcimg.cn/notify-race.png)",
+                "10001",
+                delayed_notify,
+                lambda _payload: None,
+            )
+        )
+        await notify_started.wait()
+        guard.resume(key)
+        release_notify.set()
+        await challenge
+
+        self.assertFalse(guard.is_paused(key))
+
+    async def test_failure_receipt_during_click_cannot_be_overwritten_by_old_click(self):
+        click_started = asyncio.Event()
+        release_click = asyncio.Event()
+
+        async def exact_answer(_kwargs):
+            return "🚗"
+
+        async def delayed_click(_payload):
+            click_started.set()
+            await release_click.wait()
+            return {"retcode": 0, "status": "ok"}
+
+        client = FakeVisionClient(exact_answer)
+        with patch.object(captcha_module, "AsyncOpenAI", return_value=client):
+            guard = CaptchaGuard(
+                {"enabled": True, "vision_api_key": "fixture", "vision_model": "fixture-model"}
+            )
+            key = "10001:20002"
+            challenge = asyncio.create_task(
+                guard.handle(
+                    key,
+                    make_event("seq-race"),
+                    "请点击图中第1个表情 ![captcha](https://qqbot.ugcimg.cn/race.png)",
+                    "10001",
+                    noop_notify,
+                    delayed_click,
+                )
+            )
+            await click_started.wait()
+            await guard.handle(key, make_event("receipt-race"), "验证码错误", "10001", noop_notify, delayed_click)
+            release_click.set()
+            await challenge
+
+        self.assertTrue(guard.is_paused(key))
+        self.assertEqual("failed", guard.status(key).phase)
+
+    async def test_manual_success_receipt_during_click_cannot_be_overwritten_by_old_click(self):
+        click_started = asyncio.Event()
+        release_click = asyncio.Event()
+
+        async def exact_answer(_kwargs):
+            return "🚗"
+
+        async def delayed_click(_payload):
+            click_started.set()
+            await release_click.wait()
+            return {"retcode": 0, "status": "ok"}
+
+        client = FakeVisionClient(exact_answer)
+        with patch.object(captcha_module, "AsyncOpenAI", return_value=client):
+            guard = CaptchaGuard(
+                {
+                    "enabled": True,
+                    "vision_api_key": "fixture",
+                    "vision_model": "fixture-model",
+                    "auto_resume": False,
+                }
+            )
+            key = "10001:20002"
+            challenge = asyncio.create_task(
+                guard.handle(
+                    key,
+                    make_event("seq-manual-race"),
+                    "请点击图中第1个表情 ![captcha](https://qqbot.ugcimg.cn/manual-race.png)",
+                    "10001",
+                    noop_notify,
+                    delayed_click,
+                )
+            )
+            await click_started.wait()
+            await guard.handle(key, make_event("manual-receipt"), "验证成功", "10001", noop_notify, delayed_click)
+            release_click.set()
+            await challenge
+
+        self.assertTrue(guard.is_paused(key))
+        self.assertEqual("verified", guard.status(key).phase)
 
     async def test_two_to_five_digit_spirit_stone_reward_confirms_success(self):
         guard = CaptchaGuard({"enabled": True, "auto_resume": True})
@@ -475,7 +653,7 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_reply_waits_for_manual_resume_when_auto_resume_is_disabled(self):
         guard = CaptchaGuard({"enabled": True, "auto_resume": False})
         key = "10001:20002"
-        guard.pause(key, "等待官方确认")
+        guard.pause(key, "等待官方确认", phase="awaiting_confirmation", msg_seq="seq-manual")
 
         async def click(_payload):
             return None
@@ -492,6 +670,43 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertTrue(guard.is_paused(key))
         self.assertEqual(guard.status(key).phase, "verified")
+
+    async def test_click_error_redacts_callback_data_from_logs_and_notice(self):
+        async def exact_answer(_kwargs):
+            return "🚗"
+
+        logger = RecordingLogger()
+        notices = []
+
+        async def notify(message):
+            notices.append(message)
+
+        async def rejected_click(_payload):
+            raise RuntimeError("OneBot {'callback_data': 'callback-secret'} rejected")
+
+        client = FakeVisionClient(exact_answer)
+        with patch.object(captcha_module, "AsyncOpenAI", return_value=client):
+            guard = CaptchaGuard(
+                {
+                    "enabled": True,
+                    "vision_api_key": "fixture",
+                    "vision_model": "fixture-model",
+                    "debug_print": True,
+                },
+                logger=logger,
+            )
+            await guard.handle(
+                "10001:20002",
+                make_event("seq-secret"),
+                "请点击图中第1个表情 ![captcha](https://qqbot.ugcimg.cn/secret.png)",
+                "10001",
+                notify,
+                rejected_click,
+            )
+
+        output = "\n".join([*logger.records, *notices])
+        self.assertNotIn("callback-secret", output)
+        self.assertIn("<redacted>", output)
 
     async def test_manual_resume_invalidates_inflight_visual_result(self):
         started = asyncio.Event()
