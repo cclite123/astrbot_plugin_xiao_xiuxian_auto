@@ -55,7 +55,8 @@
     "vision_api_key": "",
     "vision_base_url": "https://ark.cn-beijing.volces.com/api/v3",
     "vision_model": "",
-    "debug_print": false,
+    "debug_print": true,
+    "_comment_auto_resume": "收到官方验证成功回执后自动恢复；点击接口返回成功时仍保持暂停。",
     "auto_resume": true
   },
   "_comment_coordinator": "任务协调器配置；控制多个任务之间的发送间隔和执行顺序。",

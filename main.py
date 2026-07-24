@@ -39,7 +39,7 @@ try:
     from .auto_alchemy_optimizer import AutoAlchemyOptimizer
     from .linjie import LinjieUpgradeController, format_money as format_linjie_money
     from .endless import EndlessTowerController
-    from .captcha_guard import CaptchaGuard
+    from .captcha_guard import CaptchaGuard, is_click_action_accepted
 except ImportError:
     from storage import JsonStore, make_key
     from bounty import BountyController
@@ -53,7 +53,7 @@ except ImportError:
     from auto_alchemy_optimizer import AutoAlchemyOptimizer
     from linjie import LinjieUpgradeController, format_money as format_linjie_money
     from endless import EndlessTowerController
-    from captcha_guard import CaptchaGuard
+    from captcha_guard import CaptchaGuard, is_click_action_accepted
 
 PLUGIN_NAME = "astrbot_plugin_xiao_xiuxian_auto"
 OFFICIAL_BOT_QQ_DEFAULT = "3889001741"
@@ -2302,14 +2302,15 @@ class XiaoXiuxianAuto(Star):
         async def notify(message: str) -> None:
             await self._raw_send_by_key(key, message)
 
-        async def click(payload: Dict[str, str]) -> None:
+        async def click(payload: Dict[str, str]):
             self_id = self._self_id_from_key(key)
             client = self._find_client_by_self_id(self_id)
             if client is None:
                 raise RuntimeError("未找到 OneBot 客户端")
             result = await self._do_send_action(client, "click_inline_keyboard_button", payload)
-            if result is not True:
-                raise RuntimeError(str(result))
+            if not is_click_action_accepted(result):
+                raise RuntimeError(f"OneBot 未明确接受点击请求：{result}")
+            return result
 
         return await guard.handle(key, event, raw_text, self._self_id_from_key(key), notify, click)
 
@@ -2340,8 +2341,7 @@ class XiaoXiuxianAuto(Star):
             if target is None:
                 continue
             try:
-                await target(action, **payload)
-                return True
+                return await target(action, **payload)
             except Exception as exc:
                 last_error = exc
         return locals().get("last_error", RuntimeError("没有可用的 OneBot action 接口"))

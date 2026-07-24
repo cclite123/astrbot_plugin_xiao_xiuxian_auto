@@ -29,6 +29,22 @@ class MemoryStore:
 
 
 class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
+    def test_captcha_click_keeps_and_validates_the_raw_onebot_result(self):
+        main_text = (ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'return await target(action, **payload)',
+            main_text,
+        )
+        self.assertIn(
+            'if not is_click_action_accepted(result):',
+            main_text,
+        )
+        self.assertNotIn(
+            'await target(action, **payload)\n                return True',
+            main_text,
+        )
+
     def test_special_bounty_items_are_individual_priorities(self):
         options = [
             BountyOption(1, "普通任务", 100, 1, 100, "普通奖励"),

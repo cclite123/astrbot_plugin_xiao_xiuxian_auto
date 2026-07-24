@@ -8,8 +8,8 @@
       "vision_api_key": {"description": "视觉模型 API Key", "type": "string", "default": ""},
       "vision_base_url": {"description": "视觉模型 Base URL", "type": "string", "default": "https://ark.cn-beijing.volces.com/api/v3"},
       "vision_model": {"description": "视觉模型 ID", "type": "string", "default": ""},
-      "debug_print": {"description": "验证码调试日志", "type": "bool", "default": false},
-      "auto_resume": {"description": "点击成功后自动恢复", "type": "bool", "default": true}
+      "debug_print": {"description": "验证码调试日志", "type": "bool", "default": true, "hint": "记录识别、匹配、点击和官方回执的完整诊断链路；API Key 与 callback_data 不会明文输出。"},
+      "auto_resume": {"description": "官方确认验证通过后自动恢复", "type": "bool", "default": true, "hint": "点击接口成功仅代表已提交；插件会继续暂停，直到收到官方成功回执。"}
     }
   },
   "bounty": {
