@@ -317,6 +317,24 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("apiPost('alchemy_rules/load'", page_text)
         self.assertIn("apiPost('herb_prices/load'", page_text)
 
+    def test_webui_has_daily_send_stats_tab_and_refresh_lifecycle(self):
+        page_text = (ROOT / "pages" / "config" / "app.js").read_text(encoding="utf-8")
+        style_text = (ROOT / "pages" / "config" / "style.css").read_text(encoding="utf-8")
+
+        self.assertIn("__send_stats", page_text)
+        self.assertIn("send_stats/load", page_text)
+        self.assertIn("sendStatsRefreshTimer", page_text)
+        self.assertIn("5000", page_text)
+        self.assertIn("clearInterval", page_text)
+        self.assertIn("send-stats-grid", page_text)
+        self.assertIn("preferredTab", page_text)
+        self.assertIn(".send-stats-grid", style_text)
+        self.assertIn(
+            "grid-template-columns: repeat(3, minmax(0, 1fr))",
+            style_text,
+        )
+        self.assertIn("grid-template-columns: 1fr", style_text)
+
     def test_herb_price_page_uses_grade_groups_and_responsive_rows(self):
         page_text = (ROOT / "pages" / "config" / "app.js").read_text(encoding="utf-8")
         style_text = (ROOT / "pages" / "config" / "style.css").read_text(encoding="utf-8")

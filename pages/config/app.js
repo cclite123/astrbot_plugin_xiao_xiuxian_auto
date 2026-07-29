@@ -43,6 +43,12 @@ const bridge = _realBridge || {
       },
       unclassified: {},
     };
+    if (ep === 'send_stats/load') return {
+      self_id: body.self_id,
+      date: '2026-07-29',
+      counts: { market_view: 128, purchase: 342, alchemy: 76 },
+      total: 546,
+    };
     console.log('[preview] save', ep, body);
     return { ok: true, reloaded: true };
   },
@@ -61,10 +67,12 @@ let currentTab = null;
 let currentAccount = '';
 let accountLoadGeneration = 0;
 let lastExpandedHerbGrade = HERB_GRADES[0];
+let sendStatsRefreshTimer = null;
 
 const SPECIAL_TABS = [
   { key: '__alchemy', label: '炼金名单', icon: '🧪' },
   { key: '__herb', label: '药材上限价', icon: '🌿' },
+  { key: '__send_stats', label: '发送统计', icon: '📈' },
 ];
 
 if (PREVIEW_MODE) {
@@ -201,9 +209,11 @@ function renderField(key, item, value, path) {
 }
 
 function renderTab(modKey) {
+  stopSendStatsRefresh();
   currentTab = modKey;
   if (modKey === '__alchemy') return renderAlchemyTab();
   if (modKey === '__herb') return renderHerbTab();
+  if (modKey === '__send_stats') return renderSendStatsTab();
   saveBtn.style.display = '';
   searchEl.style.display = '';
   formEl.innerHTML = '';
@@ -330,6 +340,88 @@ function renderHerbTab() {
     if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
     formEl.innerHTML = '<div class="loading">加载药材价格失败：' + (e && e.message ? e.message : e) + '</div>';
   });
+}
+
+function stopSendStatsRefresh() {
+  if (sendStatsRefreshTimer !== null) {
+    clearInterval(sendStatsRefreshTimer);
+    sendStatsRefreshTimer = null;
+  }
+}
+
+function renderSendStatsTab() {
+  const selfId = currentAccount;
+  const generation = accountLoadGeneration;
+  let loading = false;
+  saveBtn.style.display = 'none';
+  searchEl.style.display = 'none';
+  [...tabsEl.children].forEach(b => b.classList.toggle('active', b.dataset.key === '__send_stats'));
+  formEl.innerHTML = `
+    <div class="send-stats-header">
+      <div>
+        <div class="section-title">📈 今日发送统计</div>
+        <div id="send-stats-date" class="send-stats-date">北京时间 · 加载中…</div>
+      </div>
+      <button id="refresh-send-stats-btn" type="button" title="刷新发送统计">↻ 刷新</button>
+    </div>
+    <div class="section-hint">统计当前账号所有绑定群今日进入发送队列的命令；验证码暂停期间的排队命令也会计入。</div>
+    <div class="send-stats-grid" aria-live="polite">
+      <div class="send-stat-item">
+        <span class="send-stat-label">坊市查看</span>
+        <strong id="send-stat-market-view">0</strong>
+      </div>
+      <div class="send-stat-item">
+        <span class="send-stat-label">购买</span>
+        <strong id="send-stat-purchase">0</strong>
+      </div>
+      <div class="send-stat-item">
+        <span class="send-stat-label">炼丹</span>
+        <strong id="send-stat-alchemy">0</strong>
+      </div>
+    </div>
+    <div class="send-stats-total">
+      <span>今日合计</span>
+      <strong id="send-stat-total">0 次</strong>
+    </div>
+    <div id="send-stats-error" class="send-stats-error" hidden></div>
+  `;
+
+  async function loadSendStats(initial = false) {
+    if (loading) return;
+    loading = true;
+    const refreshBtn = document.getElementById('refresh-send-stats-btn');
+    if (refreshBtn) refreshBtn.disabled = true;
+    try {
+      const data = await bridge.apiPost('send_stats/load', { self_id: selfId });
+      if (generation !== accountLoadGeneration || selfId !== currentAccount || currentTab !== '__send_stats') return;
+      const counts = (data && data.counts) || {};
+      document.getElementById('send-stats-date').textContent = `北京时间 · ${(data && data.date) || '未知日期'}`;
+      document.getElementById('send-stat-market-view').textContent = Number(counts.market_view) || 0;
+      document.getElementById('send-stat-purchase').textContent = Number(counts.purchase) || 0;
+      document.getElementById('send-stat-alchemy').textContent = Number(counts.alchemy) || 0;
+      document.getElementById('send-stat-total').textContent = `${Number(data && data.total) || 0} 次`;
+      const errorEl = document.getElementById('send-stats-error');
+      errorEl.hidden = true;
+      errorEl.textContent = '';
+    } catch (e) {
+      if (generation !== accountLoadGeneration || selfId !== currentAccount || currentTab !== '__send_stats') return;
+      const message = '加载发送统计失败：' + (e && e.message ? e.message : e);
+      const errorEl = document.getElementById('send-stats-error');
+      errorEl.hidden = false;
+      errorEl.textContent = message;
+      if (!initial) toast('❌ ' + message, false);
+    } finally {
+      loading = false;
+      if (generation === accountLoadGeneration && selfId === currentAccount && currentTab === '__send_stats') {
+        const currentRefreshBtn = document.getElementById('refresh-send-stats-btn');
+        if (currentRefreshBtn) currentRefreshBtn.disabled = false;
+      }
+    }
+  }
+
+  document.getElementById('refresh-send-stats-btn').addEventListener('click', () => loadSendStats(false));
+  loadSendStats(true);
+  sendStatsRefreshTimer = setInterval(() => loadSendStats(false), 5000);
 }
 
 function makeHerbGradeSection(grade, expanded) {
@@ -513,6 +605,7 @@ function saveHerbPrices() {
 }
 
 function renderTabs() {
+  const preferredTab = currentTab;
   tabsEl.innerHTML = '';
   SPECIAL_TABS.forEach(t => {
     const b = document.createElement('button');
@@ -529,7 +622,10 @@ function renderTabs() {
     b.addEventListener('click', () => renderTab(key));
     tabsEl.appendChild(b);
   }
-  if (tabsEl.children.length > 0) renderTab(tabsEl.children[0].dataset.key);
+  if (tabsEl.children.length > 0) {
+    const preferredButton = [...tabsEl.children].find(button => button.dataset.key === preferredTab);
+    renderTab(preferredButton ? preferredTab : tabsEl.children[0].dataset.key);
+  }
 }
 
 searchEl.addEventListener('input', () => {
@@ -565,6 +661,7 @@ saveBtn.addEventListener('click', async () => {
 });
 
 async function loadAccount(selfId) {
+  stopSendStatsRefresh();
   const generation = ++accountLoadGeneration;
   currentAccount = selfId;
   saveBtn.disabled = true;

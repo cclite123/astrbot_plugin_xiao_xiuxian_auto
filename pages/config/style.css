@@ -365,6 +365,79 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none !important; 
   color: var(--red);
 }
 
+/* 每日发送统计 */
+.send-stats-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.send-stats-header .section-title { margin-bottom: 2px; }
+.send-stats-date {
+  color: var(--muted);
+  font-size: 12px;
+}
+.send-stats-header button {
+  flex: 0 0 auto;
+  min-height: 36px;
+}
+.send-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+.send-stat-item {
+  display: flex;
+  min-width: 0;
+  min-height: 112px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+}
+.send-stat-label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+.send-stat-item strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 30px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.send-stats-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.send-stats-total strong {
+  color: var(--primary);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.send-stats-error {
+  margin-top: 12px;
+  padding: 10px 12px;
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 7%, transparent);
+  border-left: 3px solid var(--red);
+}
+.send-stats-error[hidden] { display: none; }
+
 .loading {
   padding: 60px;
   text-align: center;
@@ -415,6 +488,8 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none !important; 
   .herb-name-input { grid-column: 1 / -1; grid-row: 2; }
   .herb-price-input { grid-column: 1; grid-row: 3; }
   .herb-delete-button { grid-column: 2; grid-row: 3; }
+  .send-stats-grid { grid-template-columns: 1fr; }
+  .send-stat-item { min-height: 96px; }
 }
 
 /* 预览模式徽章 */
