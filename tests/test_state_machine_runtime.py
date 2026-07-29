@@ -525,6 +525,109 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("药材名重复", result["error"])
         self.assertEqual([("药材名重复", 400)], errors)
 
+    async def test_official_command_is_counted_when_queued_during_captcha_pause(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin._send_locks = {}
+        plugin._send_queues = {}
+        plugin._send_blocked_keys = {}
+        blocker = asyncio.create_task(asyncio.Event().wait())
+        plugin._send_tasks = {"111:group": blocker}
+        recorded = []
+
+        class Stats:
+            async def record(self, self_id, text):
+                recorded.append((self_id, text))
+
+        plugin.send_stats = Stats()
+
+        await plugin._enqueue_official_command(
+            "111:group",
+            "@3889001741 坊市查看药材1",
+        )
+
+        self.assertEqual(
+            ["@3889001741 坊市查看药材1"],
+            plugin._send_queues["111:group"],
+        )
+        self.assertEqual(
+            [("111", "@3889001741 坊市查看药材1")],
+            recorded,
+        )
+        blocker.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await blocker
+
+    async def test_stats_failure_does_not_remove_queued_command(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin._send_locks = {}
+        plugin._send_queues = {}
+        plugin._send_blocked_keys = {}
+        blocker = asyncio.create_task(asyncio.Event().wait())
+        plugin._send_tasks = {"111:group": blocker}
+        attempted = []
+
+        class Stats:
+            async def record(self, self_id, text):
+                attempted.append((self_id, text))
+                raise OSError("disk")
+
+        plugin.send_stats = Stats()
+
+        await plugin._enqueue_official_command(
+            "111:group",
+            "@3889001741 坊市购买abc 1",
+        )
+
+        self.assertEqual(
+            ["@3889001741 坊市购买abc 1"],
+            plugin._send_queues["111:group"],
+        )
+        self.assertEqual(
+            [("111", "@3889001741 坊市购买abc 1")],
+            attempted,
+        )
+        blocker.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await blocker
+
+    async def test_send_stats_page_api_returns_selected_account_snapshot(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+
+        async def validate(self_id):
+            return self_id == "111"
+
+        class Request:
+            async def json(self, default=None):
+                return {"self_id": "111"}
+
+        class Stats:
+            async def snapshot(self, self_id):
+                self.requested_self_id = self_id
+                return {
+                    "date": "2026-07-29",
+                    "counts": {
+                        "market_view": 2,
+                        "purchase": 3,
+                        "alchemy": 4,
+                    },
+                    "total": 9,
+                }
+
+        stats = Stats()
+        plugin._page_validate_account = validate
+        plugin.send_stats = stats
+
+        with patch.object(main, "request", Request()):
+            result = await plugin._page_load_send_stats()
+
+        self.assertEqual("111", stats.requested_self_id)
+        self.assertEqual("111", result["self_id"])
+        self.assertEqual(9, result["total"])
+        self.assertEqual(3, result["counts"]["purchase"])
+
     async def test_account_config_save_rejects_infrastructure_fields_and_reloads_one_account(self):
         main = _import_main_with_astrbot_stubs()
         plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)

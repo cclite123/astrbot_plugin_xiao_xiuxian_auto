@@ -37,6 +37,7 @@ try:
     from .market_price import MarketPriceProvider
     from .inventory_ops import InventoryOpsController
     from .auto_alchemy_optimizer import AutoAlchemyOptimizer
+    from .send_stats import DailySendStats
     from .linjie import LinjieUpgradeController, format_money as format_linjie_money
     from .endless import EndlessTowerController
     from .captcha_guard import CaptchaGuard, is_click_action_accepted
@@ -51,6 +52,7 @@ except ImportError:
     from market_price import MarketPriceProvider
     from inventory_ops import InventoryOpsController
     from auto_alchemy_optimizer import AutoAlchemyOptimizer
+    from send_stats import DailySendStats
     from linjie import LinjieUpgradeController, format_money as format_linjie_money
     from endless import EndlessTowerController
     from captcha_guard import CaptchaGuard, is_click_action_accepted
@@ -517,6 +519,7 @@ class XiaoXiuxianAuto(Star):
         self.data_dir = os.path.join(_plugin_dir, "data")
         os.makedirs(self.data_dir, exist_ok=True)
         self.store = JsonStore(os.path.join(self.data_dir, "bounty_state.json"))
+        self.send_stats = DailySendStats(self.store)
         self._reload_lock = asyncio.Lock()
         self._page_api_enabled = False
         self._tick_task: Optional[asyncio.Task] = None
@@ -896,6 +899,9 @@ class XiaoXiuxianAuto(Star):
                 f"/{PLUGIN_NAME}/status", self._page_get_status, ["GET"], "小小修仙运行状态"
             )
             self.context.register_web_api(
+                f"/{PLUGIN_NAME}/send_stats/load", self._page_load_send_stats, ["POST"], "每日发送统计"
+            )
+            self.context.register_web_api(
                 f"/{PLUGIN_NAME}/alchemy_rules/load", self._page_load_alchemy_rules, ["POST"], "炼金白黑名单"
             )
             self.context.register_web_api(
@@ -997,6 +1003,19 @@ class XiaoXiuxianAuto(Star):
             "page_api_enabled": getattr(self, "_page_api_enabled", False),
             "bound_keys": len(self._known_keys),
         })
+
+    async def _page_load_send_stats(self):
+        if request is None:
+            return error_response("web API 不可用", status_code=500)
+        payload = await request.json(default={})
+        self_id = str(payload.get("self_id") or "").strip() if isinstance(payload, dict) else ""
+        if not self_id or not await self._page_validate_account(self_id):
+            return error_response("请选择已配置或已绑定账号", status_code=400)
+        try:
+            snapshot = await self.send_stats.snapshot(self_id)
+        except Exception as e:
+            return error_response(f"加载发送统计失败：{e}", status_code=500)
+        return json_response({"self_id": self_id, **snapshot})
 
     async def _page_load_alchemy_rules(self):
         if request is None:
@@ -2195,6 +2214,10 @@ class XiaoXiuxianAuto(Star):
             task = self._send_tasks.get(key)
             if task is None or task.done():
                 self._send_tasks[key] = asyncio.create_task(self._send_worker(key))
+        try:
+            await self.send_stats.record(self._self_id_from_key(key), text)
+        except Exception as e:
+            logger.warning(f"[xiao_xiuxian_auto] 记录每日发送统计失败: key={key} err={e}")
 
     async def _pick_next_command_index(self, key: str, snapshot: List[str]) -> Optional[int]:
 
