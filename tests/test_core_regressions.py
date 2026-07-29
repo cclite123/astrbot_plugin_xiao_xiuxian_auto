@@ -317,6 +317,20 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("apiPost('alchemy_rules/load'", page_text)
         self.assertIn("apiPost('herb_prices/load'", page_text)
 
+    def test_herb_price_page_uses_grade_groups_and_responsive_rows(self):
+        page_text = (ROOT / "pages" / "config" / "app.js").read_text(encoding="utf-8")
+        style_text = (ROOT / "pages" / "config" / "style.css").read_text(encoding="utf-8")
+
+        self.assertIn("from './herb_prices.mjs'", page_text)
+        self.assertIn("herb-grade-toggle", page_text)
+        self.assertIn("herb-grade-select", page_text)
+        self.assertIn("validateHerbRows", page_text)
+        self.assertIn("groups: result.groups", page_text)
+        self.assertIn(".herb-row {", style_text)
+        self.assertIn(".herb-grade {", style_text)
+        self.assertIn("grid-template-columns: 150px minmax(180px, 1fr) 140px 36px", style_text)
+        self.assertNotIn("#herb-list .field", style_text)
+
 
 if __name__ == "__main__":
     unittest.main()

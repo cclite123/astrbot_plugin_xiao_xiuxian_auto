@@ -279,17 +279,91 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none !important; 
   margin-bottom: 6px;
 }
 
-/* 药材价格行 */
-#herb-list .field {
-  padding: 10px 12px;
-  margin-bottom: 8px;
-  display: flex;
+/* 药材价格分组 */
+#herb-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.herb-grade {
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.herb-grade-unclassified { border-color: var(--red); }
+.herb-grade-toggle {
+  width: 100%;
+  min-height: 44px;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 700;
+}
+.herb-grade-toggle:hover {
+  border-color: transparent;
+  background: var(--primary-light);
+  color: var(--text);
+}
+.herb-grade-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.herb-grade-chevron {
+  width: 16px;
+  color: var(--text);
+  font-size: 14px;
+  text-align: center;
+}
+.herb-grade-body[hidden] { display: none; }
+.herb-row {
+  display: grid;
+  grid-template-columns: 150px minmax(180px, 1fr) 140px 36px;
   gap: 8px;
   align-items: center;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
 }
-#herb-list .field input { max-width: none; }
-#herb-list .field input[type=text] { flex: 1; }
-#herb-list .field input[type=number] { width: 130px; flex-shrink: 0; }
+.herb-row input,
+.herb-row select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 7px 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  font: inherit;
+}
+.herb-row input:focus,
+.herb-row select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+.herb-row.invalid { background: color-mix(in srgb, var(--red) 7%, transparent); }
+.herb-row [aria-invalid="true"] { border-color: var(--red); }
+.herb-delete-button {
+  width: 36px;
+  height: 36px;
+  justify-content: center;
+  padding: 0;
+  color: var(--red);
+  font-size: 20px;
+  line-height: 1;
+}
+.herb-delete-button:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
 
 .loading {
   padding: 60px;
@@ -317,12 +391,30 @@ button:disabled { opacity: .5; cursor: not-allowed; transform: none !important; 
   to { transform: translateY(0); opacity: 1; }
 }
 @media (max-width: 720px) {
-  .tabs { width: 160px; }
+  .body { flex-direction: column; }
+  .tabs {
+    width: 100%;
+    display: flex;
+    gap: 4px;
+    padding: 8px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .tabs button { width: auto; flex: 0 0 auto; margin-bottom: 0; }
   .actions { width: 100%; margin-left: 0; flex-wrap: wrap; }
   .account-picker { width: 100%; }
   .account-picker select { flex: 1; min-width: 0; max-width: none; }
   .actions input[type=search] { width: auto; min-width: 140px; flex: 1; }
   .form-area { padding: 18px 16px; }
+  .herb-row {
+    grid-template-columns: minmax(120px, 1fr) 36px;
+    gap: 8px;
+  }
+  .herb-grade-select { grid-column: 1; }
+  .herb-name-input { grid-column: 1 / -1; grid-row: 2; }
+  .herb-price-input { grid-column: 1; grid-row: 3; }
+  .herb-delete-button { grid-column: 2; grid-row: 3; }
 }
 
 /* 预览模式徽章 */

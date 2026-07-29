@@ -1,3 +1,10 @@
+import {
+  HERB_GRADES,
+  firstNonEmptyGrade,
+  normalizeHerbPayload,
+  validateHerbRows,
+} from './herb_prices.mjs';
+
 const _realBridge = window.AstrBotPluginPage;
 const PREVIEW_MODE = !_realBridge;
 
@@ -28,7 +35,14 @@ const bridge = _realBridge || {
   apiPost: async (ep, body) => {
     if (ep === 'config/load') return { config: MOCK_CONFIG, schema: MOCK_SCHEMA };
     if (ep === 'alchemy_rules/load') return { whitelist_pill: ['培元丹','回元丹','养元丹'], blacklist_equip: ['龙渊剑','惊雷'], blacklist_artifact: ['两仪心经'] };
-    if (ep === 'herb_prices/load') return { prices: { '罗犀草': 100, '何首乌': 500, '九叶芝': 2000, '地心火芝': 8000 } };
+    if (ep === 'herb_prices/load') return {
+      groups: {
+        '九品药材': { '尘磊岩麟果': 1000, '离火梧桐芝': 1000 },
+        '七品药材': { '凤血果': 370 },
+        '三品药材': { '九叶芝': 320 },
+      },
+      unclassified: {},
+    };
     console.log('[preview] save', ep, body);
     return { ok: true, reloaded: true };
   },
@@ -46,6 +60,7 @@ let config = {};
 let currentTab = null;
 let currentAccount = '';
 let accountLoadGeneration = 0;
+let lastExpandedHerbGrade = HERB_GRADES[0];
 
 const SPECIAL_TABS = [
   { key: '__alchemy', label: '炼金名单', icon: '🧪' },
@@ -278,21 +293,38 @@ function renderHerbTab() {
   formEl.innerHTML = '<div class="loading">加载药材上限价…</div>';
   bridge.apiPost('herb_prices/load', { self_id: selfId }).then(data => {
     if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
-    const prices = (data && data.prices) || {};
+    const model = normalizeHerbPayload(data);
+    lastExpandedHerbGrade = firstNonEmptyGrade(model.groups);
     formEl.innerHTML = `
       <div class="section-title">🌿 药材购买上限价</div>
       <div class="section-hint">炼丹购买每种药材时的最高可接受价格（单位：万灵石）。超过此价的药材不会购买。保存后下次购买即生效。</div>
       <div id="herb-list"></div>
       <div class="toolbar-row">
-        <button id="add-herb-btn">+ 添加药材</button>
+        <button id="add-herb-btn" type="button">+ 添加药材</button>
         <button id="save-herb-btn" class="primary">保存价格</button>
       </div>
     `;
     const listEl = document.getElementById('herb-list');
-    const entries = Object.entries(prices);
-    if (entries.length === 0) entries.push(['', '']);
-    entries.forEach(([name, price]) => listEl.appendChild(makeHerbRow(name, price)));
-    document.getElementById('add-herb-btn').addEventListener('click', () => listEl.appendChild(makeHerbRow('', '')));
+    HERB_GRADES.forEach(grade => {
+      listEl.appendChild(makeHerbGradeSection(grade, grade === lastExpandedHerbGrade));
+    });
+    HERB_GRADES.forEach(grade => {
+      Object.entries(model.groups[grade]).forEach(([name, price]) => {
+        appendHerbRow(grade, name, price);
+      });
+    });
+    if (Object.keys(model.unclassified).length > 0) {
+      listEl.prepend(makeHerbGradeSection('', true));
+      Object.entries(model.unclassified).forEach(([name, price]) => {
+        appendHerbRow('', name, price);
+      });
+    }
+    updateHerbGradeCounts();
+    document.getElementById('add-herb-btn').addEventListener('click', () => {
+      const row = appendHerbRow(lastExpandedHerbGrade, '', '');
+      expandHerbGrade(lastExpandedHerbGrade);
+      row.querySelector('.herb-name-input').focus();
+    });
     document.getElementById('save-herb-btn').addEventListener('click', saveHerbPrices);
   }).catch(e => {
     if (generation !== accountLoadGeneration || selfId !== currentAccount) return;
@@ -300,31 +332,181 @@ function renderHerbTab() {
   });
 }
 
-function makeHerbRow(name, price) {
-  const row = document.createElement('div');
-  row.className = 'herb-row';
-  const nameInp = document.createElement('input'); nameInp.type = 'text'; nameInp.value = name; nameInp.placeholder = '药材名';
-  nameInp.style.maxWidth = '260px';
-  const priceInp = document.createElement('input'); priceInp.type = 'number'; priceInp.step = '0.01'; priceInp.value = price; priceInp.placeholder = '价格(万)';
-  priceInp.style.maxWidth = '140px';
-  const delBtn = document.createElement('button'); delBtn.textContent = '删除';
-  delBtn.addEventListener('click', () => row.remove());
-  row.appendChild(nameInp); row.appendChild(priceInp); row.appendChild(delBtn);
+function makeHerbGradeSection(grade, expanded) {
+  const section = document.createElement('section');
+  section.className = 'herb-grade' + (grade ? '' : ' herb-grade-unclassified');
+  section.dataset.grade = grade;
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'herb-grade-toggle';
+  toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  const label = document.createElement('span');
+  label.className = 'herb-grade-label';
+  label.textContent = grade || '待分类药材';
+  const summary = document.createElement('span');
+  summary.className = 'herb-grade-summary';
+  const count = document.createElement('span');
+  count.className = 'herb-grade-count';
+  count.textContent = '0 种';
+  const chevron = document.createElement('span');
+  chevron.className = 'herb-grade-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.textContent = expanded ? '⌃' : '⌄';
+  summary.appendChild(count);
+  summary.appendChild(chevron);
+  toggle.appendChild(label);
+  toggle.appendChild(summary);
+  const body = document.createElement('div');
+  body.className = 'herb-grade-body';
+  body.hidden = !expanded;
+  toggle.addEventListener('click', () => {
+    const nextExpanded = toggle.getAttribute('aria-expanded') !== 'true';
+    setHerbGradeExpanded(section, nextExpanded);
+    if (nextExpanded && grade) lastExpandedHerbGrade = grade;
+  });
+  section.appendChild(toggle);
+  section.appendChild(body);
+  return section;
+}
+
+function setHerbGradeExpanded(section, expanded) {
+  const toggle = section.querySelector('.herb-grade-toggle');
+  const body = section.querySelector('.herb-grade-body');
+  toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  toggle.querySelector('.herb-grade-chevron').textContent = expanded ? '⌃' : '⌄';
+  body.hidden = !expanded;
+}
+
+function findHerbGradeSection(grade) {
+  return [...document.querySelectorAll('#herb-list .herb-grade')]
+    .find(section => section.dataset.grade === grade);
+}
+
+function expandHerbGrade(grade) {
+  const section = findHerbGradeSection(grade);
+  if (!section) return;
+  setHerbGradeExpanded(section, true);
+  if (grade) lastExpandedHerbGrade = grade;
+}
+
+function updateHerbGradeCounts() {
+  document.querySelectorAll('#herb-list .herb-grade').forEach(section => {
+    const count = section.querySelectorAll(':scope > .herb-grade-body > .herb-row').length;
+    section.querySelector('.herb-grade-count').textContent = `${count} 种`;
+  });
+}
+
+function appendHerbRow(grade, name, price) {
+  const section = findHerbGradeSection(grade);
+  if (!section) throw new Error(`未找到药材品级：${grade || '待分类'}`);
+  const row = makeHerbRow(grade, name, price);
+  section.querySelector('.herb-grade-body').appendChild(row);
+  updateHerbGradeCounts();
   return row;
 }
 
-function saveHerbPrices() {
-  const rows = document.querySelectorAll('#herb-list .herb-row');
-  const prices = {};
-  rows.forEach(row => {
-    const inputs = row.querySelectorAll('input');
-    const name = inputs[0].value.trim();
-    const price = parseFloat(inputs[1].value);
-    if (name && !isNaN(price) && price > 0) prices[name] = price;
+function makeHerbRow(grade, name, price) {
+  const row = document.createElement('div');
+  row.className = 'herb-row';
+  const gradeSelect = document.createElement('select');
+  gradeSelect.className = 'herb-grade-select';
+  gradeSelect.setAttribute('aria-label', `${name || '新药材'}的品级`);
+  if (!grade) {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = '请选择品级';
+    placeholder.selected = true;
+    placeholder.disabled = true;
+    gradeSelect.appendChild(placeholder);
+  }
+  HERB_GRADES.forEach(optionGrade => {
+    const option = document.createElement('option');
+    option.value = optionGrade;
+    option.textContent = optionGrade;
+    option.selected = optionGrade === grade;
+    gradeSelect.appendChild(option);
   });
+  const nameInp = document.createElement('input');
+  nameInp.type = 'text';
+  nameInp.className = 'herb-name-input';
+  nameInp.value = name;
+  nameInp.placeholder = '药材名';
+  nameInp.setAttribute('aria-label', '药材名');
+  const priceInp = document.createElement('input');
+  priceInp.type = 'number';
+  priceInp.className = 'herb-price-input';
+  priceInp.step = '0.01';
+  priceInp.value = price;
+  priceInp.placeholder = '价格（万）';
+  priceInp.setAttribute('aria-label', `${name || '新药材'}的最高价格（万灵石）`);
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'herb-delete-button';
+  delBtn.textContent = '×';
+  delBtn.title = '删除药材';
+  delBtn.setAttribute('aria-label', '删除药材');
+  delBtn.addEventListener('click', () => {
+    row.remove();
+    updateHerbGradeCounts();
+  });
+  gradeSelect.addEventListener('change', () => {
+    const targetSection = findHerbGradeSection(gradeSelect.value);
+    if (!targetSection) return;
+    targetSection.querySelector('.herb-grade-body').appendChild(row);
+    expandHerbGrade(gradeSelect.value);
+    clearHerbRowError(row);
+    updateHerbGradeCounts();
+  });
+  row.appendChild(gradeSelect);
+  row.appendChild(nameInp);
+  row.appendChild(priceInp);
+  row.appendChild(delBtn);
+  return row;
+}
+
+function clearHerbRowError(row) {
+  row.classList.remove('invalid');
+  row.querySelectorAll('[aria-invalid="true"]').forEach(control => {
+    control.removeAttribute('aria-invalid');
+  });
+}
+
+function saveHerbPrices() {
+  const rows = [...document.querySelectorAll('#herb-list .herb-row')];
+  rows.forEach(clearHerbRowError);
+  const result = validateHerbRows(rows.map(row => ({
+    grade: row.querySelector('.herb-grade-select').value,
+    name: row.querySelector('.herb-name-input').value,
+    price: row.querySelector('.herb-price-input').value,
+  })));
+  if (!result.ok) {
+    const messages = {
+      'invalid-grade': '请选择一品至九品中的药材品级',
+      'empty-name': '药材名不能为空',
+      'invalid-price': '药材价格必须大于 0',
+      'duplicate-name': '同一种药材只能配置一次',
+    };
+    result.errors.forEach(error => {
+      const row = rows[error.index];
+      if (!row) return;
+      row.classList.add('invalid');
+      const selector = error.code === 'invalid-grade'
+        ? '.herb-grade-select'
+        : error.code === 'empty-name' || error.code === 'duplicate-name'
+          ? '.herb-name-input'
+          : '.herb-price-input';
+      row.querySelector(selector).setAttribute('aria-invalid', 'true');
+    });
+    toast('❌ 无法保存：' + messages[result.errors[0].code], false);
+    return;
+  }
   const btn = document.getElementById('save-herb-btn');
-  btn.disabled = true; btn.textContent = '保存中…';
-  bridge.apiPost('herb_prices/save', { self_id: currentAccount, prices })
+  btn.disabled = true;
+  btn.textContent = '保存中…';
+  bridge.apiPost('herb_prices/save', {
+    self_id: currentAccount,
+    groups: result.groups,
+  })
     .then(() => toast('✅ 药材价格已保存并生效', true))
     .catch(e => toast('❌ 保存失败：' + (e && e.message ? e.message : e), false))
     .finally(() => { btn.disabled = false; btn.textContent = '保存价格'; });
