@@ -786,6 +786,7 @@ class XiaoXiuxianAuto(Star):
         self._seed_account_file(os.path.join(self.data_dir, "herb_max_prices.yaml"), herb_prices_path)
         auto_cfg = dict(cfg.get("auto_alchemy", {}) or {})
         auto_cfg["herb_max_prices_path"] = herb_prices_path
+        auto_cfg["herb_grade_catalog_path"] = os.path.join(self.data_dir, "herb_max_prices.yaml")
         auto_alchemy = AutoAlchemyOptimizer(
             official_qq=official_qq,
             recipe_path=os.path.join(self.data_dir, "alchemy_recipes.txt"),
@@ -1037,20 +1038,22 @@ class XiaoXiuxianAuto(Star):
         if not self_id or not await self._page_validate_account(self_id):
             return error_response("请选择已配置或已绑定账号", status_code=400)
         optimizer = self._controller("auto_alchemy", f"{self_id}:page")
-        return json_response({"self_id": self_id, "prices": dict(optimizer.herb_max_prices or {})})
+        return json_response({"self_id": self_id, **optimizer.get_herb_price_config()})
 
     async def _page_save_herb_prices(self):
         if request is None:
             return error_response("web API 不可用", status_code=500)
         payload = await request.json(default={})
-        prices = payload.get("prices") if isinstance(payload, dict) else None
+        groups = payload.get("groups") if isinstance(payload, dict) else None
         self_id = str(payload.get("self_id") or "").strip() if isinstance(payload, dict) else ""
         if not self_id or not await self._page_validate_account(self_id):
             return error_response("请选择已配置或已绑定账号", status_code=400)
-        if not isinstance(prices, dict):
-            return error_response("prices 必须是对象", status_code=400)
+        if not isinstance(groups, dict):
+            return error_response("groups 必须是对象", status_code=400)
         try:
-            self._controller("auto_alchemy", f"{self_id}:page").set_herb_max_prices(prices)
+            self._controller("auto_alchemy", f"{self_id}:page").set_herb_price_groups(groups)
+        except ValueError as e:
+            return error_response(str(e), status_code=400)
         except Exception as e:
             return error_response(f"保存药材价格失败：{e}", status_code=500)
         return json_response({"ok": True, "self_id": self_id})

@@ -457,6 +457,74 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("222", second_inventory.runtime_path)
             self.assertNotEqual(first_alchemy.herb_max_prices_path, second_alchemy.herb_max_prices_path)
 
+    async def test_herb_price_page_api_returns_groups_for_selected_account(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+
+        async def validate_account(self_id):
+            return self_id == "111"
+
+        class FakeRequest:
+            async def json(self, default=None):
+                return {"self_id": "111"}
+
+        class FakeOptimizer:
+            def get_herb_price_config(self):
+                return {
+                    "groups": {"九品药材": {"尘磊岩麟果": 960.0}},
+                    "unclassified": {},
+                    "prices": {"尘磊岩麟果": 960.0},
+                }
+
+        plugin._page_validate_account = validate_account
+        plugin._controller = lambda module, key: FakeOptimizer()
+
+        with patch.object(main, "request", FakeRequest()):
+            result = await plugin._page_load_herb_prices()
+
+        self.assertEqual("111", result["self_id"])
+        self.assertEqual(960.0, result["groups"]["九品药材"]["尘磊岩麟果"])
+        self.assertEqual({}, result["unclassified"])
+        self.assertEqual({"尘磊岩麟果": 960.0}, result["prices"])
+
+    async def test_herb_price_page_api_rejects_invalid_groups(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+
+        async def validate_account(self_id):
+            return self_id == "111"
+
+        class FakeRequest:
+            async def json(self, default=None):
+                return {
+                    "self_id": "111",
+                    "groups": {"九品药材": {"同名药": 10}},
+                }
+
+        class FakeOptimizer:
+            def set_herb_price_groups(self, groups):
+                raise ValueError("药材名重复")
+
+        errors = []
+
+        def capture_error(message, status_code=500):
+            errors.append((message, status_code))
+            return {"error": message, "status_code": status_code}
+
+        plugin._page_validate_account = validate_account
+        plugin._controller = lambda module, key: FakeOptimizer()
+
+        with patch.object(main, "request", FakeRequest()), patch.object(
+            main,
+            "error_response",
+            side_effect=capture_error,
+        ):
+            result = await plugin._page_save_herb_prices()
+
+        self.assertEqual(400, result["status_code"])
+        self.assertIn("药材名重复", result["error"])
+        self.assertEqual([("药材名重复", 400)], errors)
+
     async def test_account_config_save_rejects_infrastructure_fields_and_reloads_one_account(self):
         main = _import_main_with_astrbot_stubs()
         plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
