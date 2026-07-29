@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import math
 import os
 import re
 import tempfile
@@ -162,6 +163,18 @@ class AutoAlchemyJob:
 
 class AutoAlchemyOptimizer:
 
+    HERB_GRADES = (
+        "九品药材",
+        "八品药材",
+        "七品药材",
+        "六品药材",
+        "五品药材",
+        "四品药材",
+        "三品药材",
+        "二品药材",
+        "一品药材",
+    )
+
     RE_RECIPE = re.compile(
         r"配方主药(?P<main>.+?)(?P<main_qty>\d+)"
         r"药引(?P<guide>.+?)"
@@ -256,7 +269,12 @@ class AutoAlchemyOptimizer:
         self.herb_max_prices_path = str(cfg.get("herb_max_prices_path", "") or "")
         if not self.herb_max_prices_path and self.snapshot_path:
             self.herb_max_prices_path = os.path.join(os.path.dirname(self.snapshot_path), "herb_max_prices.yaml")
-        self.herb_max_prices: Dict[str, float] = self._load_herb_max_prices()
+        self.herb_grade_catalog_path = str(cfg.get("herb_grade_catalog_path", "") or "")
+        (
+            self.herb_price_groups,
+            self.unclassified_herb_prices,
+            self.herb_max_prices,
+        ) = self._load_herb_price_config()
 
     def _info(self, msg: str) -> None:
         if self.log:
@@ -266,62 +284,163 @@ class AutoAlchemyOptimizer:
         if self.log:
             self.log.warning(msg)
 
-    def _load_herb_max_prices(self) -> Dict[str, float]:
-        """加载药材最高价 YAML 配置。"""
-        if not self.herb_max_prices_path or not os.path.exists(self.herb_max_prices_path):
+    @classmethod
+    def _empty_herb_price_groups(cls) -> Dict[str, Dict[str, float]]:
+        return {grade: {} for grade in cls.HERB_GRADES}
+
+    def _read_herb_price_yaml(self, path: str) -> Dict[str, Any]:
+        if not path or not os.path.exists(path):
             return {}
         if yaml is None:
             self._warn("PyYAML 未安装，无法加载药材最高价配置")
             return {}
         try:
-            with open(self.herb_max_prices_path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
         except Exception as e:
             self._warn(f"加载药材最高价配置失败：{e}")
             return {}
-        if not isinstance(data, dict):
-            return {}
-        result: Dict[str, float] = {}
+        return data if isinstance(data, dict) else {}
+
+    def _catalog_herb_grades(self) -> Dict[str, str]:
+        catalog: Dict[str, str] = {}
+        for grade, herbs in self._read_herb_price_yaml(self.herb_grade_catalog_path).items():
+            if grade not in self.HERB_GRADES or not isinstance(herbs, dict):
+                continue
+            for name in herbs:
+                normalized = self.normalize_name(str(name))
+                if normalized:
+                    catalog[normalized] = grade
+        return catalog
+
+    @staticmethod
+    def _positive_finite_price(value: Any) -> Optional[float]:
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            return None
+        return price if math.isfinite(price) and price > 0 else None
+
+    def _load_herb_price_config(
+        self,
+    ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, float], Dict[str, float]]:
+        groups = self._empty_herb_price_groups()
+        unclassified: Dict[str, float] = {}
+        flat_prices: Dict[str, float] = {}
+        catalog = self._catalog_herb_grades()
+        data = self._read_herb_price_yaml(self.herb_max_prices_path)
+
+        def store(name: Any, value: Any, grade: str = "") -> None:
+            normalized = self.normalize_name(str(name))
+            price = self._positive_finite_price(value)
+            if not normalized or price is None or normalized in flat_prices:
+                return
+            target_grade = grade if grade in self.HERB_GRADES else catalog.get(normalized, "")
+            if target_grade:
+                groups[target_grade][normalized] = price
+            else:
+                unclassified[normalized] = price
+            flat_prices[normalized] = price
+
         for grade_or_name, value in data.items():
             if isinstance(value, dict):
+                grade = str(grade_or_name)
                 for name, price in value.items():
-                    try:
-                        p = float(price)
-                    except Exception:
-                        continue
-                    if p > 0:
-                        result[self.normalize_name(str(name))] = p
-            elif isinstance(value, (int, float)):
-                try:
-                    p = float(value)
-                except Exception:
-                    continue
-                if p > 0:
-                    result[self.normalize_name(str(grade_or_name))] = p
-        return result
-    def _save_herb_max_prices(self, prices: Dict[str, float]) -> None:
-        """保存药材最高价 YAML 配置。"""
-        if not self.herb_max_prices_path or yaml is None:
-            return
+                    store(name, price, grade)
+            else:
+                store(grade_or_name, value)
+        return groups, unclassified, flat_prices
+
+    def get_herb_price_config(self) -> Dict[str, Any]:
+        return {
+            "groups": {
+                grade: dict(self.herb_price_groups.get(grade, {}))
+                for grade in self.HERB_GRADES
+            },
+            "unclassified": dict(self.unclassified_herb_prices),
+            "prices": dict(self.herb_max_prices),
+        }
+
+    def _clean_herb_price_groups(
+        self, groups: Dict[str, Any]
+    ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, float]]:
+        if not isinstance(groups, dict):
+            raise ValueError("groups 必须是对象")
+        unknown_grades = [str(grade) for grade in groups if grade not in self.HERB_GRADES]
+        if unknown_grades:
+            raise ValueError(f"未知药材品级：{unknown_grades[0]}")
+
+        cleaned = self._empty_herb_price_groups()
+        flat_prices: Dict[str, float] = {}
+        for grade in self.HERB_GRADES:
+            herbs = groups.get(grade, {})
+            if not isinstance(herbs, dict):
+                raise ValueError(f"{grade} 必须是对象")
+            for name, value in herbs.items():
+                normalized = self.normalize_name(str(name))
+                if not normalized:
+                    raise ValueError("药材名不能为空")
+                price = self._positive_finite_price(value)
+                if price is None:
+                    raise ValueError(f"{normalized} 的价格必须大于 0")
+                if normalized in flat_prices:
+                    raise ValueError(f"药材名重复：{normalized}")
+                cleaned[grade][normalized] = price
+                flat_prices[normalized] = price
+        return cleaned, flat_prices
+
+    def _write_herb_price_groups(self, groups: Dict[str, Dict[str, float]]) -> None:
+        if not self.herb_max_prices_path:
+            raise RuntimeError("药材最高价配置路径为空")
+        if yaml is None:
+            raise RuntimeError("PyYAML 未安装，无法保存药材最高价配置")
+        directory = os.path.dirname(self.herb_max_prices_path) or "."
+        os.makedirs(directory, exist_ok=True)
+        persisted = {grade: herbs for grade, herbs in groups.items() if herbs}
+        fd, temp_path = tempfile.mkstemp(
+            prefix="herb_max_prices_",
+            suffix=".tmp",
+            dir=directory,
+        )
         try:
-            os.makedirs(os.path.dirname(self.herb_max_prices_path), exist_ok=True)
-            with open(self.herb_max_prices_path, "w", encoding="utf-8") as f:
-                yaml.dump(prices, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        except Exception as e:
-            self._warn(f"保存药材最高价配置失败：{e}")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                yaml.safe_dump(
+                    persisted,
+                    f,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+            os.replace(temp_path, self.herb_max_prices_path)
+        except Exception:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+            raise
+
+    def set_herb_price_groups(self, groups: Dict[str, Any]) -> None:
+        cleaned, flat_prices = self._clean_herb_price_groups(groups)
+        self._write_herb_price_groups(cleaned)
+        self.herb_price_groups = cleaned
+        self.unclassified_herb_prices = {}
+        self.herb_max_prices = flat_prices
 
     def set_herb_max_prices(self, prices: Dict[str, float]) -> None:
-        """整体设置药材上限价并持久化（供 WebUI Page 调用）。"""
-        cleaned: Dict[str, float] = {}
+        """兼容旧调用方，将扁平价格按目录或当前分组归类后保存。"""
+        grade_by_name = self._catalog_herb_grades()
+        for grade, herbs in self.herb_price_groups.items():
+            for name in herbs:
+                grade_by_name[name] = grade
+        groups = self._empty_herb_price_groups()
         for name, price in (prices or {}).items():
-            try:
-                p = float(price)
-            except Exception:
-                continue
-            if p > 0:
-                cleaned[self.normalize_name(str(name))] = p
-        self.herb_max_prices = cleaned
-        self._save_herb_max_prices(cleaned)
+            normalized = self.normalize_name(str(name))
+            grade = grade_by_name.get(normalized, "")
+            if not grade:
+                raise ValueError(f"药材缺少品级：{normalized}")
+            groups[grade][normalized] = price
+        self.set_herb_price_groups(groups)
 
     @classmethod
     def normalize_name(cls, name: str) -> str:
