@@ -439,9 +439,11 @@ class CaptchaGuard:
     async def _recognize(self, image_url: str, target_index: int, labels: List[str]) -> str:
         prompt = (
             "这是一张 QQ 机器人的干扰验证码图片，请从左到右识别图中的物品。"
+            "忽略浅淡、半透明的背景干扰，只统计深色高对比的前景表情。"
             f"题目要求找出第 {target_index} 个物品。"
-            f"请只从以下候选按钮中选择一个最匹配的答案：{labels}。"
-            "只回复候选项本身的文字或 Emoji，不要标点，不要解释。"
+            f"候选按钮作为唯一识别类别，禁止自由命名；请只从以下候选按钮中选择一个最匹配的答案：{labels}。"
+            "对变形、遮挡图案逐一与候选比较。最终只能原样返回一个候选按钮，"
+            "不要标点，不要解释。"
         )
         response = await self._client.chat.completions.create(
             model=self.model,
