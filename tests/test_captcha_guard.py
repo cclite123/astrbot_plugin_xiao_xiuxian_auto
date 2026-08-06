@@ -443,6 +443,56 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([True], fetches)
         self.assertEqual("detail-button-1", clicks[0]["button_id"])
 
+    async def test_missing_keyboard_captures_raw_pb_without_logging_its_contents(self):
+        event = SimpleNamespace(
+            is_at_or_wake_command=True,
+            message_obj=SimpleNamespace(
+                group_id="1040779831",
+                raw_message={"message_seq": 902},
+            ),
+        )
+        raw_pb = "0a087365637265742d63616c6c6261636b"
+        logger = RecordingLogger()
+        captures = []
+
+        async def fetch_message():
+            return {
+                "message_id": 901,
+                "raw_pb": raw_pb,
+                "raw": {"rawPb": raw_pb},
+                "message": [{"type": "text", "data": {"text": "captcha"}}],
+            }
+
+        async def capture_raw_pb(records):
+            captures.append(records)
+            return "data/captcha_diagnostics/latest_1660315547_1040779831.json"
+
+        guard = CaptchaGuard(
+            {"enabled": True, "debug_print": True},
+            logger=logger,
+        )
+        handled = await guard.handle(
+            "1660315547:1040779831",
+            event,
+            "[At:1660315547] 请点击图中第1个表情 "
+            "![captcha](https://qqbot.ugcimg.cn/raw-pb.png)",
+            "1660315547",
+            noop_notify,
+            lambda _payload: None,
+            fetch_message=fetch_message,
+            capture_raw_pb=capture_raw_pb,
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(1, len(captures))
+        self.assertEqual(
+            [{"source": "event.message_detail.raw_pb", "encoding": "hex", "data": raw_pb}],
+            captures[0],
+        )
+        logs = "\n".join(logger.records)
+        self.assertIn("latest_1660315547_1040779831.json", logs)
+        self.assertNotIn(raw_pb, logs)
+
     async def test_model_receives_button_labels_and_unmatched_name_falls_back_to_first(self):
         async def answer_with_name(_kwargs):
             return "拖鞋"

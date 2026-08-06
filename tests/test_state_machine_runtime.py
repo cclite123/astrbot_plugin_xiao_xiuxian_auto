@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import sys
 import tempfile
 import time
@@ -684,6 +685,7 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 _click,
                 *,
                 fetch_message,
+                capture_raw_pb,
             ):
                 detail = await fetch_message()
                 return bool(detail)
@@ -709,6 +711,54 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("get_msg", client.calls[0][0])
         self.assertEqual(901, client.calls[0][1]["message_id"])
         self.assertEqual(1660315547, client.calls[0][1]["self_id"])
+
+    async def test_captcha_raw_pb_diagnostic_is_written_to_account_group_latest_file(self):
+        main = _import_main_with_astrbot_stubs()
+        raw_pb = "0a087365637265742d63616c6c6261636b"
+
+        class FakeGuard:
+            async def handle(
+                self,
+                _key,
+                _event,
+                _raw_text,
+                _self_id,
+                _notify,
+                _click,
+                *,
+                fetch_message,
+                capture_raw_pb,
+            ):
+                await fetch_message()
+                path = await capture_raw_pb([
+                    {"source": "event.message_detail.raw_pb", "encoding": "hex", "data": raw_pb}
+                ])
+                return bool(path)
+
+        class FakeClient:
+            async def call_action(self, _action, **payload):
+                return {"message_id": payload["message_id"]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+            plugin.data_dir = tmp
+            plugin._captcha_for_key = lambda _key: FakeGuard()
+            plugin._find_client_by_self_id = lambda _self_id: FakeClient()
+            plugin._raw_send_by_key = lambda *_args: None
+            handled = await plugin._handle_captcha(
+                "1660315547:1040779831",
+                {"message_id": 901},
+                "请点击图中第3个表情对应的按钮",
+            )
+
+            path = Path(tmp) / "captcha_diagnostics" / "latest_1660315547_1040779831.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertTrue(handled)
+        self.assertEqual("1660315547", payload["self_id"])
+        self.assertEqual("1040779831", payload["group_id"])
+        self.assertEqual(901, payload["message_id"])
+        self.assertEqual(raw_pb, payload["raw_pb"][0]["data"])
 
     async def test_account_business_controllers_use_isolated_config_and_files(self):
         main = _import_main_with_astrbot_stubs()

@@ -2371,6 +2371,14 @@ class XiaoXiuxianAuto(Star):
                 raise RuntimeError(f"get_msg 未返回消息对象：{result}")
             return result
 
+        async def capture_raw_pb(records: List[Dict[str, str]]) -> Optional[str]:
+            return await asyncio.to_thread(
+                self._write_captcha_raw_pb_diagnostic,
+                key,
+                event,
+                records,
+            )
+
         return await guard.handle(
             key,
             event,
@@ -2379,7 +2387,38 @@ class XiaoXiuxianAuto(Star):
             notify,
             click,
             fetch_message=fetch_message,
+            capture_raw_pb=capture_raw_pb,
         )
+
+    def _write_captcha_raw_pb_diagnostic(
+        self,
+        key: str,
+        event,
+        records: List[Dict[str, str]],
+    ) -> str:
+        self_id, group_id = (str(key).split(":", 1) + [""])[:2]
+        safe_self_id = re.sub(r"[^0-9A-Za-z_-]", "_", self_id) or "unknown"
+        safe_group_id = re.sub(r"[^0-9A-Za-z_-]", "_", group_id) or "unknown"
+        directory = os.path.join(self.data_dir, "captcha_diagnostics")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"latest_{safe_self_id}_{safe_group_id}.json")
+        tmp = f"{path}.{time.time_ns()}.tmp"
+        payload = {
+            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "self_id": self_id,
+            "group_id": group_id,
+            "message_id": event_field(event, "message_id"),
+            "raw_pb": records,
+        }
+        with open(tmp, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return path
 
     async def _raw_send_by_key(self, key: str, text: str) -> None:
 

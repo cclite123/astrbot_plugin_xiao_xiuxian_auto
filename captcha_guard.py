@@ -73,6 +73,8 @@ class CaptchaGuard:
     FAILURE_TEXTS = ("验证码不正确", "验证码错误", "验证失败")
     RECEIPT_PHASES = ("submitting", "awaiting_confirmation")
     MAX_SEEN_MSG_SEQS = 64
+    MAX_RAW_PB_RECORDS = 4
+    MAX_RAW_PB_CHARS = 16 * 1024 * 1024
     CALLBACK_DATA_RE = re.compile(
         r"(?i)((?:['\"]?callback[_ ]?data['\"]?|callbackdata)\s*[:=]\s*)(?:'[^']*'|\"[^\"]*\"|[^,\s)]+)"
     )
@@ -210,6 +212,9 @@ class CaptchaGuard:
         click: Callable[[Dict[str, str]], Awaitable[Any]],
         *,
         fetch_message: Optional[Callable[[], Awaitable[Any]]] = None,
+        capture_raw_pb: Optional[
+            Callable[[List[Dict[str, str]]], Awaitable[Optional[str]]]
+        ] = None,
     ) -> bool:
         if not self.enabled:
             return False
@@ -238,6 +243,7 @@ class CaptchaGuard:
                 notify,
                 click,
                 fetch_message,
+                capture_raw_pb,
             )
         finally:
             self._log(
@@ -256,6 +262,9 @@ class CaptchaGuard:
         notify: Callable[[str], Awaitable[None]],
         click: Callable[[Dict[str, str]], Awaitable[Any]],
         fetch_message: Optional[Callable[[], Awaitable[Any]]],
+        capture_raw_pb: Optional[
+            Callable[[List[Dict[str, str]]], Awaitable[Optional[str]]]
+        ],
     ) -> bool:
         image = self.IMAGE_RE.search(raw_text)
         if not image:
@@ -281,6 +290,24 @@ class CaptchaGuard:
                 }
                 challenge, parse_error = self._parse_challenge(parse_source)
         if challenge is None:
+            if self.debug and capture_raw_pb is not None:
+                records = self._raw_pb_records(parse_source)
+                if records:
+                    try:
+                        diagnostic_path = await capture_raw_pb(records)
+                    except Exception as exc:
+                        self._log(
+                            "warning",
+                            "[captcha][EVENT] raw_pb 诊断文件写入失败 error=%s",
+                            self._redact_text(exc),
+                        )
+                    else:
+                        if diagnostic_path:
+                            self._log(
+                                "warning",
+                                "[captcha][EVENT] raw_pb 诊断样本已保存 path=%s（文件可能包含敏感回调数据，请勿公开）",
+                                diagnostic_path,
+                            )
             self.pause(key, parse_error, phase="invalid_challenge")
             await notify(f"⚠️ 验证码键盘字段不完整：{parse_error}；任务保持暂停，完成验证后发送「继续任务」。")
             self._log("warning", "[captcha] 验证码键盘字段不完整 key=%s detail=%s", key, parse_error)
@@ -531,6 +558,66 @@ class CaptchaGuard:
             "segment_types": sorted(segment_types),
             "node_keys": sorted(node_keys)[:32],
         }
+
+    @classmethod
+    def _raw_pb_records(cls, event) -> List[Dict[str, str]]:
+        records: List[Dict[str, str]] = []
+        seen_objects = set()
+        seen_payloads = set()
+
+        def normalize(value) -> Optional[Tuple[str, str]]:
+            if isinstance(value, (bytes, bytearray)):
+                return "hex", bytes(value).hex()
+            if isinstance(value, str):
+                data = value.strip()
+                if not data:
+                    return None
+                cleaned = data[2:] if data.lower().startswith("0x") else data
+                encoding = (
+                    "hex"
+                    if len(cleaned) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", cleaned)
+                    else "text"
+                )
+                return encoding, cleaned if encoding == "hex" else data
+            if isinstance(value, dict) and value.get("type") == "Buffer":
+                data = value.get("data")
+                if isinstance(data, list):
+                    try:
+                        return "hex", bytes(data).hex()
+                    except (TypeError, ValueError):
+                        return None
+            return None
+
+        def walk(value, path: str, depth: int = 0) -> None:
+            if depth > 8 or len(records) >= cls.MAX_RAW_PB_RECORDS or value is None:
+                return
+            if isinstance(value, (dict, list, tuple)) or hasattr(value, "__dict__"):
+                if id(value) in seen_objects:
+                    return
+                seen_objects.add(id(value))
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    child_path = f"{path}.{key}"
+                    if str(key).replace("_", "").lower() == "rawpb":
+                        normalized = normalize(child)
+                        if normalized is not None:
+                            encoding, data = normalized
+                            if data not in seen_payloads and len(data) <= cls.MAX_RAW_PB_CHARS:
+                                seen_payloads.add(data)
+                                records.append({
+                                    "source": child_path,
+                                    "encoding": encoding,
+                                    "data": data,
+                                })
+                    walk(child, child_path, depth + 1)
+            elif isinstance(value, (list, tuple)):
+                for index, child in enumerate(value):
+                    walk(child, f"{path}[{index}]", depth + 1)
+            elif hasattr(value, "__dict__"):
+                walk(vars(value), path, depth + 1)
+
+        walk(event, "event")
+        return records
 
     def _parse_challenge(self, event) -> Tuple[Optional[CaptchaChallenge], str]:
         message_obj = getattr(event, "message_obj", None)

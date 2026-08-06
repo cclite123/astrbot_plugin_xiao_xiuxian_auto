@@ -34,6 +34,7 @@ data/*_runtime_config.json
 data/page_config_override.json
 data/account_config_overrides.json
 data/accounts/
+data/captcha_diagnostics/
 
 # Logs
 *.log
