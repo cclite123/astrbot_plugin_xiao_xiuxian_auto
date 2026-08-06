@@ -645,9 +645,10 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
         prompt = client.chat.completions.calls[0]["messages"][0]["content"][0]["text"]
         self.assertIn("🚗", prompt)
         self.assertIn("🐱", prompt)
-        self.assertIn("颜色深浅不能作为", prompt)
-        self.assertIn("边缘清晰", prompt)
-        self.assertNotIn("只统计深色高对比", prompt)
+        self.assertIn("浅色、低饱和或半透明图案全部是背景干扰", prompt)
+        self.assertIn("颜色最深", prompt)
+        self.assertIn("即使轮廓清晰也不能计数", prompt)
+        self.assertNotIn("颜色深浅不能作为", prompt)
         status = guard.status("10001:20002")
         self.assertTrue(status.active)
         self.assertEqual(status.phase, "awaiting_confirmation")
