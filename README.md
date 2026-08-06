@@ -90,6 +90,19 @@ xiaoxiuxian/
    pip install pyyaml    # 可选，用于 herb_max_prices.yaml 解析
    ```
 
+   使用 LLBot 时，请在 LLBot 中创建 OneBot 11 反向 WebSocket 连接并接入 AstrBot 的
+   `aiocqhttp` 适配器，同时确认连接配置包含：
+
+   ```json
+   {
+     "messageFormat": "array",
+     "reportSelfMessage": true
+   }
+   ```
+
+   `reportSelfMessage` 必须为 `true`。插件通过 LLBot 上报的 `message_sent` 事件识别机器人
+   自己发送的绑定和控制命令；关闭后，这些命令不会进入插件。
+
 3. **编辑配置文件**
 
    打开 `config.json`，按需调整：
@@ -245,6 +258,9 @@ xiaoxiuxian/
 ---
 
 ## 验证码守卫
+
+> **当前限制：** 新版 AstrBot 中验证码识别和内联按钮回调链路已经失效，本次 LLBot
+> 兼容不包含这两项修复。普通文本指令和官方文本回执不受此限制。
 
 小小发送“请点击图中第…个表情”的验证码并 @ 当前机器人时，插件会暂停本群所有自动指令。配置 `captcha.vision_api_key`、`captcha.vision_base_url` 和 `captcha.vision_model` 后，插件会解析内联键盘候选项，将候选标签一并交给兼容 OpenAI 的视觉模型识别，再通过 OneBot 点击对应按钮。
 

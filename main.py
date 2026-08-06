@@ -41,6 +41,7 @@ try:
     from .linjie import LinjieUpgradeController, format_money as format_linjie_money
     from .endless import EndlessTowerController
     from .captcha_guard import CaptchaGuard, is_click_action_accepted
+    from .protocol_compat import event_field, event_fingerprint, normalize_qq_id as _normalize_qq_id
 except ImportError:
     from storage import JsonStore, make_key
     from bounty import BountyController
@@ -56,6 +57,7 @@ except ImportError:
     from linjie import LinjieUpgradeController, format_money as format_linjie_money
     from endless import EndlessTowerController
     from captcha_guard import CaptchaGuard, is_click_action_accepted
+    from protocol_compat import event_field, event_fingerprint, normalize_qq_id as _normalize_qq_id
 
 PLUGIN_NAME = "astrbot_plugin_xiao_xiuxian_auto"
 OFFICIAL_BOT_QQ_DEFAULT = "3889001741"
@@ -531,6 +533,7 @@ class XiaoXiuxianAuto(Star):
         self._any_bot: Any = None
         self._native_hooked_bot_ids: set[str] = set()
         self._recent_self_commands: Dict[str, float] = {}
+        self._recent_official_events: Dict[str, float] = {}
         self._last_native_hook_ts: float = 0.0
         self._send_queues: Dict[str, List[str]] = {}
         self._send_locks: Dict[str, asyncio.Lock] = {}
@@ -2357,7 +2360,7 @@ class XiaoXiuxianAuto(Star):
             logger.warning(f"[xiao_xiuxian_auto] 未找到 self_id={self_id} 的客户端，无法发送: {text}")
             return
         payload = self._build_message(text)
-        result = await self._do_send(client, group_id, payload)
+        result = await self._do_send(client, group_id, payload, self_id=self_id)
         if result is True:
             return
         if self.auto_block_permanent_send_error and self._is_permanent_send_error(result):
@@ -2375,13 +2378,16 @@ class XiaoXiuxianAuto(Star):
                 last_error = exc
         return locals().get("last_error", RuntimeError("没有可用的 OneBot action 接口"))
 
-    async def _do_send(self, client, group_id, payload):
+    async def _do_send(self, client, group_id, payload, self_id: Optional[str] = None):
         group_id = str(group_id)
         if group_id.startswith("private:"):
             user_id = int(group_id.split(":", 1)[1])
             action, kw = "send_private_msg", {"user_id": user_id, "message": payload}
         else:
             action, kw = "send_group_msg", {"group_id": int(group_id), "message": payload}
+        normalized_self_id = _normalize_qq_id(self_id)
+        if normalized_self_id:
+            kw["self_id"] = int(normalized_self_id)
         candidates = [
             ("call_action", getattr(client, "call_action", None)),
             ("call_action", getattr(getattr(client, "api", None), "call_action", None)),
@@ -2402,21 +2408,52 @@ class XiaoXiuxianAuto(Star):
         return RuntimeError("没有可用的发送接口")
 
     def _find_client_by_self_id(self, self_id: str):
-        if bot := self._cached_bots.get(str(self_id)): return bot
+        target_self_id = _normalize_qq_id(self_id)
+        if not target_self_id:
+            return None
+        if bot := self._cached_bots.get(target_self_id):
+            return bot
+
+        candidates = []
+        candidate_ids = set()
+
+        def remember_candidate(candidate) -> None:
+            if candidate is None or id(candidate) in candidate_ids:
+                return
+            candidate_ids.add(id(candidate))
+            candidates.append(candidate)
+
+        remember_candidate(self._any_bot)
         try:
             for plat in _get_platform_list(self.context):
                 if bot := _dig_bot(plat):
                     if isinstance(bot, dict):
-                        if str(self_id) in bot:
-                            self._cached_bots[str(self_id)] = bot[str(self_id)]
-                            return bot[str(self_id)]
+                        for sid_hint, candidate in bot.items():
+                            remember_candidate(candidate)
+                            candidate_self_id = _normalize_qq_id(sid_hint)
+                            if not candidate_self_id:
+                                candidate_self_id = _normalize_qq_id(getattr(candidate, "self_id", None))
+                            if not candidate_self_id:
+                                candidate_self_id = _normalize_qq_id(getattr(candidate, "qq", None))
+                            if candidate_self_id:
+                                self._cached_bots[candidate_self_id] = candidate
+                            if candidate_self_id == target_self_id:
+                                return candidate
                     else:
-                        sid = getattr(bot, "self_id", None) or getattr(bot, "qq", None)
-                        if sid is None or str(sid) == str(self_id):
-                            self._cached_bots[str(self_id)] = bot
+                        remember_candidate(bot)
+                        candidate_self_id = _normalize_qq_id(getattr(bot, "self_id", None))
+                        if not candidate_self_id:
+                            candidate_self_id = _normalize_qq_id(getattr(bot, "qq", None))
+                        if candidate_self_id:
+                            self._cached_bots[candidate_self_id] = bot
+                        if candidate_self_id == target_self_id:
                             return bot
-        except Exception: pass
-        return self._any_bot
+        except Exception as e:
+            logger.debug(f"[xiao_xiuxian_auto] 枚举 OneBot 客户端失败: {e}")
+
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
 
     @staticmethod
     def _build_message(text: str):
@@ -2425,13 +2462,11 @@ class XiaoXiuxianAuto(Star):
         return [{"type": "text", "data": {"text": text}}]
 
     def _hook_native_self_message(self) -> bool:
-
-
-
         try:
             plats = _get_platform_list(self.context)
             if not plats: return False
             hooked_any = False
+            already_hooked = False
             hooked_self = False
             hooked_official = False
             for plat in plats:
@@ -2445,91 +2480,112 @@ class XiaoXiuxianAuto(Star):
                 if isinstance(raw_bot, dict):
                     bot_items = list(raw_bot.items())
                 else:
-                    sid = getattr(raw_bot, "self_id", None) or getattr(raw_bot, "qq", None)
-                    bot_items = [(str(sid or ""), raw_bot)]
+                    sid = _normalize_qq_id(getattr(raw_bot, "self_id", None))
+                    if not sid:
+                        sid = _normalize_qq_id(getattr(raw_bot, "qq", None))
+                    bot_items = [(sid, raw_bot)]
 
                 for sid_hint, bot in bot_items:
                     if not bot:
                         continue
                     self._any_bot = bot
-                    sid = getattr(bot, "self_id", None) or getattr(bot, "qq", None) or sid_hint
-                    bot_key = str(sid or id(bot))
+                    sid = _normalize_qq_id(sid_hint)
+                    if not sid:
+                        sid = _normalize_qq_id(getattr(bot, "self_id", None))
+                    if not sid:
+                        sid = _normalize_qq_id(getattr(bot, "qq", None))
+                    bot_key = sid or str(id(bot))
                     if bot_key in self._native_hooked_bot_ids:
+                        already_hooked = True
                         continue
                     if sid:
-                        self._cached_bots[str(sid)] = bot
+                        self._cached_bots[sid] = bot
 
                     @bot.on_message("group")
-                    async def _on_grp_msg(event, _plat=plat, _bot=bot, _sid_hint=str(sid or sid_hint or "")):
+                    async def _on_grp_msg(event, _plat=plat, _bot=bot, _sid_hint=sid):
                         self._remember_bot(event, _bot, _sid_hint)
-                        _uid = event.get("user_id") if isinstance(event, dict) else getattr(event, "user_id", None)
-                        _sid = event.get("self_id") if isinstance(event, dict) else getattr(event, "self_id", None)
-                        if _sid is None:
-                            _sid = _sid_hint
-                        if str(_uid) == str(_sid): return
-                        await self._handle_native_self(event, sid_hint=_sid_hint, bot=_bot)
-                        await self._handle_native_official(event, sid_hint=_sid_hint, bot=_bot)
+                        _sid, _uid, _, _ = self._get_base_info(event, bot=_bot, sid_hint=_sid_hint)
+                        _is_self = bool(_sid and _uid == _sid)
+                        await self._handle_native_self(event, force_self=_is_self, sid_hint=_sid_hint, bot=_bot)
+                        if not _is_self:
+                            await self._handle_native_official(event, sid_hint=_sid_hint, bot=_bot)
                     hooked_official = True
 
                     @bot.on_message("private")
-                    async def _on_pri_msg(event, _plat=plat, _bot=bot, _sid_hint=str(sid or sid_hint or "")):
+                    async def _on_pri_msg(event, _plat=plat, _bot=bot, _sid_hint=sid):
                         self._remember_bot(event, _bot, _sid_hint)
-                        _uid = event.get("user_id") if isinstance(event, dict) else getattr(event, "user_id", None)
-                        _sid = event.get("self_id") if isinstance(event, dict) else getattr(event, "self_id", None)
-                        if _sid is None:
-                            _sid = _sid_hint
-                        if str(_uid) == str(_sid): return
-                        await self._handle_native_self(event, sid_hint=_sid_hint, bot=_bot)
-                        await self._handle_native_official(event, sid_hint=_sid_hint, bot=_bot)
+                        _sid, _uid, _, _ = self._get_base_info(event, bot=_bot, sid_hint=_sid_hint)
+                        _is_self = bool(_sid and _uid == _sid)
+                        await self._handle_native_self(event, force_self=_is_self, sid_hint=_sid_hint, bot=_bot)
+                        if not _is_self:
+                            await self._handle_native_official(event, sid_hint=_sid_hint, bot=_bot)
                     hooked_official = True
 
                     try:
                         @bot.on("message_sent")
-                        async def _on_self_msg(event, _plat=plat, _bot=bot, _sid_hint=str(sid or sid_hint or "")):
+                        async def _on_self_msg(event, _plat=plat, _bot=bot, _sid_hint=sid):
                             self._remember_bot(event, _bot, _sid_hint)
                             await self._handle_native_self(event, force_self=True, sid_hint=_sid_hint, bot=_bot)
                         hooked_self = True
-                    except Exception: pass
+                    except Exception as e:
+                        logger.debug(f"[xiao_xiuxian_auto] 当前 OneBot 客户端不支持 message_sent 钩子: {e}")
 
                     self._native_hooked_bot_ids.add(bot_key)
                     hooked_any = True
                     logger.info(f"[xiao_xiuxian_auto] 原生拦截器已生效 ({plat.__class__.__name__}, self_id={sid or 'unknown'})")
             if hooked_any:
                 self._native_hooked = True
-                self._native_self_hooked = hooked_self
-                self._native_official_hooked = hooked_official
-            return hooked_any
+                self._native_self_hooked = self._native_self_hooked or hooked_self
+                self._native_official_hooked = self._native_official_hooked or hooked_official
+            return hooked_any or already_hooked
         except Exception as e:
             logger.exception(f"原生钩子挂载失败: {e}")
             return False
 
     def _remember_bot(self, event, bot, sid_hint: Optional[str] = None):
-        sid = event.get("self_id") if isinstance(event, dict) else getattr(event, "self_id", None)
-        if sid is None or str(sid).strip() == "":
-            sid = getattr(bot, "self_id", None) or getattr(bot, "qq", None) or sid_hint
-        if sid is not None and str(sid).strip() != "":
-            self._cached_bots[str(sid)] = bot
-            self._any_bot = bot
+        if bot is None:
+            return
+        sid = _normalize_qq_id(event_field(event, "self_id"))
+        if not sid:
+            sid = _normalize_qq_id(getattr(bot, "self_id", None))
+        if not sid:
+            sid = _normalize_qq_id(getattr(bot, "qq", None))
+        if not sid:
+            sid = _normalize_qq_id(sid_hint)
+        if sid:
+            self._cached_bots[sid] = bot
+        self._any_bot = bot
 
     def _get_base_info(self, event, bot=None, sid_hint: Optional[str] = None):
-        def _g(k, default=None):
-            if isinstance(event, dict):
-                return event.get(k, default)
-            v = getattr(event, k, default)
-            if v is not None:
-                return v
+        sid = _normalize_qq_id(event_field(event, "self_id"))
+        if not sid and bot is not None:
+            sid = _normalize_qq_id(getattr(bot, "self_id", None))
+        if not sid and bot is not None:
+            sid = _normalize_qq_id(getattr(bot, "qq", None))
+        if not sid:
+            sid = _normalize_qq_id(sid_hint)
+        uid = _normalize_qq_id(event_field(event, "user_id"))
+        gid = event_field(event, "group_id")
+        if gid is not None:
+            gid = str(gid)
+        post_type = str(event_field(event, "post_type", "") or "")
+        return sid, uid, gid, post_type
 
-            mo = getattr(event, "message_obj", None)
-            if mo is not None:
-                return getattr(mo, k, default)
-            return default
-        sid = _g("self_id", "")
-        if sid is None or str(sid).strip() == "":
-            sid = getattr(bot, "self_id", None) or getattr(bot, "qq", None) or sid_hint or ""
-        uid = _g("user_id", "")
-        gid = _g("group_id", None)
-        post_type = _g("post_type", "")
-        return str(sid), str(uid), gid, post_type
+    def _claim_official_event(self, event, self_id: str, group_id, text: str, window: float = 3.0) -> bool:
+        now = time.time()
+        recent = getattr(self, "_recent_official_events", None)
+        if not isinstance(recent, dict):
+            recent = {}
+            self._recent_official_events = recent
+        for fingerprint, timestamp in list(recent.items()):
+            if now - timestamp > window:
+                recent.pop(fingerprint, None)
+        fingerprint = event_fingerprint(event, self_id, group_id, text)
+        timestamp = recent.get(fingerprint)
+        if timestamp is not None and now - timestamp <= window:
+            return False
+        recent[fingerprint] = now
+        return True
 
     def _self_cmd_sig(self, self_id: str, group_id, text: str) -> str:
         return f"{self_id}:{group_id}:{text}"
@@ -2714,15 +2770,19 @@ class XiaoXiuxianAuto(Star):
             logger.exception(f"处理自身原生消息异常: {e}")
 
     async def _handle_native_official(self, event, sid_hint: Optional[str] = None, bot=None):
+        await self._handle_official_event(event, sid_hint=sid_hint, bot=bot)
+
+    async def _handle_official_event(self, event, sid_hint: Optional[str] = None, bot=None):
         try:
             self_id, user_id, group_id, _ = self._get_base_info(event, bot=bot, sid_hint=sid_hint)
             official_qq = self._official_qq_for_self(self_id)
             if str(user_id) != str(official_qq): return
-            if not await self._is_bound_match(self_id, group_id): return
 
             text = extract_pure_text(event)
             raw_text = extract_raw_text(event) or text
             if not text and not raw_text: return
+            if not self._claim_official_event(event, self_id, group_id, raw_text or text): return
+            if not await self._is_bound_match(self_id, group_id): return
 
             key = f"{self_id}:{group_id}"
             self._known_keys.add(key)
@@ -2752,7 +2812,7 @@ class XiaoXiuxianAuto(Star):
             await self._maybe_restore_rest_after_activities_done(key, send_cb)
 
         except Exception as e:
-            logger.exception(f"处理官方原生消息异常: {e}")
+            logger.exception(f"处理官方消息异常: {e}")
 
 
 
@@ -2934,41 +2994,4 @@ class XiaoXiuxianAuto(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_official_reply(self, event: AstrMessageEvent):
-        if getattr(self, "_native_official_hooked", False): return
-        if not self._is_official(event): return
-        text = extract_pure_text(event)
-        raw_text = extract_raw_text(event) or text
-        if not text and not raw_text: return
-
-        self_id = str(event.message_obj.self_id)
-        group_id = getattr(event.message_obj, "group_id", None)
-        if group_id is not None: group_id = str(group_id)
-
-        if not await self._is_bound_match(self_id, group_id): return
-
-        key = self._key_of_astr_event(event)
-        self._known_keys.add(key)
-        send_cb = self._make_send_cb(key)
-
-        if await self._handle_captcha(key, event, raw_text):
-            return
-
-        handled_auto_alchemy = await self.auto_alchemy.on_official_text(key, raw_text, send_cb)
-        handled_inventory = False
-        if not handled_auto_alchemy:
-            handled_inventory = await self.inventory_ops.on_official_text(key, text, send_cb)
-        if not handled_auto_alchemy and not handled_inventory:
-            await self.bounty.on_official_text(key, text, send_cb)
-            await self.secret.on_official_text(key, text, send_cb)
-            await self.routine.on_official_text(key, text, send_cb)
-            await self.sect.on_official_text(key, text, send_cb)
-            await self.cultivate.on_official_text(key, text, send_cb)
-            await self.linjie.on_official_text(key, text, send_cb)
-            await self.endless.on_official_text(key, text, send_cb)
-
-        await self._handle_seclusion_guard_text(key, text)
-
-
-
-
-        await self._maybe_restore_rest_after_activities_done(key, send_cb)
+        await self._handle_official_event(event)

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import sys
 import tempfile
 import time
 import types
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -407,6 +409,151 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], strategy_args)
         self.assertEqual([], plugin._raw_messages)
+
+    def test_qq_id_normalization_rejects_dynamic_action_partial(self):
+        main = _import_main_with_astrbot_stubs()
+        dynamic_action = functools.partial(lambda action: action, "self_id")
+
+        self.assertEqual("10001", main._normalize_qq_id(10001))
+        self.assertEqual("10001", main._normalize_qq_id(" 10001 "))
+        self.assertEqual("", main._normalize_qq_id(dynamic_action))
+        self.assertEqual("", main._normalize_qq_id(True))
+        self.assertEqual("", main._normalize_qq_id("default"))
+
+    async def test_native_hook_supports_llbot_self_events_without_duplicate_registration(self):
+        main = _import_main_with_astrbot_stubs()
+
+        class FakeBot:
+            def __init__(self):
+                self.handlers = {}
+
+            def call_action(self, *_args, **_kwargs):
+                return None
+
+            @property
+            def self_id(self):
+                return functools.partial(self.call_action, "self_id")
+
+            def on_message(self, message_type):
+                return self.on(f"message.{message_type}")
+
+            def on(self, event_name):
+                def register(handler):
+                    self.handlers.setdefault(event_name, []).append(handler)
+                    return handler
+
+                return register
+
+        bot = FakeBot()
+        platform = type("AiocqhttpAdapter", (), {"bot": bot})()
+        manager = SimpleNamespace(get_insts=lambda: [platform])
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin.context = SimpleNamespace(platform_manager=manager)
+        plugin._cached_bots = {}
+        plugin._any_bot = None
+        plugin._native_hooked = False
+        plugin._native_self_hooked = False
+        plugin._native_official_hooked = False
+        plugin._native_hooked_bot_ids = set()
+        handled = []
+
+        async def handle_self(event, force_self=False, sid_hint=None, bot=None):
+            handled.append((event, force_self, sid_hint, bot))
+
+        async def handle_official(*_args, **_kwargs):
+            return None
+
+        plugin._handle_native_self = handle_self
+        plugin._handle_native_official = handle_official
+
+        self.assertTrue(plugin._hook_native_self_message())
+        self.assertTrue(plugin._hook_native_self_message())
+        self.assertEqual(1, len(bot.handlers["message.group"]))
+        self.assertEqual(1, len(bot.handlers["message.private"]))
+        self.assertEqual(1, len(bot.handlers["message_sent"]))
+        self.assertNotIn(str(bot.self_id), plugin._cached_bots)
+
+        llbot_event = {
+            "self_id": 10001,
+            "user_id": 10001,
+            "group_id": 20002,
+            "post_type": "message_sent",
+            "message_id": 30003,
+            "raw_message": "关闭悬赏",
+        }
+        await bot.handlers["message_sent"][0](llbot_event)
+        self.assertTrue(handled[-1][1])
+        self.assertIs(bot, plugin._cached_bots["10001"])
+
+        legacy_event = dict(llbot_event, post_type="message")
+        await bot.handlers["message.group"][0](legacy_event)
+        self.assertTrue(handled[-1][1])
+
+    def test_official_event_claim_deduplicates_raw_and_astrbot_wrappers(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin._recent_official_events = {}
+        raw_event = {
+            "self_id": 10001,
+            "user_id": 3889001741,
+            "group_id": 20002,
+            "message_id": 30003,
+        }
+        astr_event = SimpleNamespace(
+            message_obj=SimpleNamespace(
+                self_id="10001",
+                group_id="20002",
+                raw_message=raw_event,
+            )
+        )
+
+        self.assertTrue(plugin._claim_official_event(raw_event, "10001", "20002", "回执"))
+        self.assertFalse(plugin._claim_official_event(astr_event, "10001", "20002", "回执"))
+
+    async def test_astrbot_official_fallback_stays_active_after_native_hook_registration(self):
+        main = _import_main_with_astrbot_stubs()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin._native_official_hooked = True
+        processed = []
+
+        async def process(event, sid_hint=None, bot=None):
+            processed.append((event, sid_hint, bot))
+
+        plugin._handle_official_event = process
+        event = object()
+
+        await plugin.on_official_reply(event)
+
+        self.assertEqual([(event, None, None)], processed)
+
+    async def test_send_routes_by_self_id_and_does_not_guess_between_clients(self):
+        main = _import_main_with_astrbot_stubs()
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **payload):
+                self.calls.append((action, payload))
+
+        first = FakeClient()
+        second = FakeClient()
+        platforms = [
+            type("AiocqhttpAdapter", (), {"bot": first})(),
+            type("AiocqhttpAdapter", (), {"bot": second})(),
+        ]
+        manager = SimpleNamespace(get_insts=lambda: platforms)
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin.context = SimpleNamespace(platform_manager=manager)
+        plugin._cached_bots = {}
+        plugin._any_bot = first
+
+        self.assertIsNone(plugin._find_client_by_self_id("10001"))
+
+        result = await plugin._do_send(first, "20002", [], self_id="10001")
+
+        self.assertTrue(result)
+        self.assertEqual(10001, first.calls[0][1]["self_id"])
 
     async def test_account_business_controllers_use_isolated_config_and_files(self):
         main = _import_main_with_astrbot_stubs()
