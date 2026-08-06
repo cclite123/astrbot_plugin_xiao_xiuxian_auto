@@ -619,6 +619,181 @@ class CaptchaGuard:
         walk(event, "event")
         return records
 
+    @staticmethod
+    def _raw_pb_bytes(value: Any) -> Optional[bytes]:
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.lower().startswith("0x"):
+                cleaned = cleaned[2:]
+            if not cleaned or len(cleaned) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", cleaned):
+                return None
+            try:
+                return bytes.fromhex(cleaned)
+            except ValueError:
+                return None
+        if isinstance(value, dict) and value.get("type") == "Buffer":
+            data = value.get("data")
+            if isinstance(data, list):
+                try:
+                    return bytes(data)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
+    def _read_pb_varint(data: bytes, position: int) -> Tuple[int, int]:
+        value = 0
+        shift = 0
+        while position < len(data) and shift < 70:
+            byte = data[position]
+            position += 1
+            value |= (byte & 0x7F) << shift
+            if byte < 0x80:
+                return value, position
+            shift += 7
+        raise ValueError("invalid protobuf varint")
+
+    @classmethod
+    def _protobuf_fields(cls, data: bytes) -> List[Tuple[int, int, Any]]:
+        fields: List[Tuple[int, int, Any]] = []
+        position = 0
+        while position < len(data):
+            if len(fields) >= 4096:
+                raise ValueError("too many protobuf fields")
+            tag, position = cls._read_pb_varint(data, position)
+            field_number, wire_type = tag >> 3, tag & 7
+            if field_number <= 0:
+                raise ValueError("invalid protobuf field")
+            if wire_type == 0:
+                value, position = cls._read_pb_varint(data, position)
+            elif wire_type == 1:
+                end = position + 8
+                if end > len(data):
+                    raise ValueError("truncated protobuf fixed64")
+                value, position = data[position:end], end
+            elif wire_type == 2:
+                size, position = cls._read_pb_varint(data, position)
+                end = position + size
+                if end > len(data):
+                    raise ValueError("truncated protobuf bytes")
+                value, position = data[position:end], end
+            elif wire_type == 5:
+                end = position + 4
+                if end > len(data):
+                    raise ValueError("truncated protobuf fixed32")
+                value, position = data[position:end], end
+            else:
+                raise ValueError(f"unsupported protobuf wire type {wire_type}")
+            fields.append((field_number, wire_type, value))
+        return fields
+
+    @staticmethod
+    def _pb_values(fields, field_number: int, wire_type: int) -> List[Any]:
+        return [
+            value
+            for number, wire, value in fields
+            if number == field_number and wire == wire_type
+        ]
+
+    @classmethod
+    def _decode_button_extra(cls, payload: bytes) -> List[Dict[str, Any]]:
+        """Decode the QQ commonElem(46) ButtonExtra fields required for captcha clicks."""
+        outer = cls._protobuf_fields(payload)
+        keyboard_data = cls._pb_values(outer, 1, 2)
+        if not keyboard_data:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for row_payload in cls._pb_values(cls._protobuf_fields(keyboard_data[0]), 1, 2):
+            buttons = []
+            for button_payload in cls._pb_values(cls._protobuf_fields(row_payload), 1, 2):
+                button_fields = cls._protobuf_fields(button_payload)
+                button_ids = cls._pb_values(button_fields, 1, 2)
+                renders = cls._pb_values(button_fields, 2, 2)
+                actions = cls._pb_values(button_fields, 3, 2)
+                if not button_ids or not renders or not actions:
+                    continue
+                render_fields = cls._protobuf_fields(renders[0])
+                action_fields = cls._protobuf_fields(actions[0])
+                labels = cls._pb_values(render_fields, 1, 2)
+                callbacks = cls._pb_values(action_fields, 5, 2)
+                if not labels or not callbacks:
+                    continue
+                try:
+                    button_id = button_ids[0].decode("utf-8")
+                    label = labels[0].decode("utf-8")
+                    callback = callbacks[0].decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if not button_id or not label or not callback:
+                    continue
+                buttons.append({
+                    "id": button_id,
+                    "render_data": {"label": label},
+                    "action": {"data": callback},
+                })
+            if buttons:
+                rows.append({"buttons": buttons})
+        return rows
+
+    @classmethod
+    def _decode_message_keyboard(
+        cls,
+        message: bytes,
+        bot_appid: str,
+    ) -> Optional[Dict[str, Any]]:
+        message_fields = cls._protobuf_fields(message)
+        content_heads = cls._pb_values(message_fields, 2, 2)
+        bodies = cls._pb_values(message_fields, 3, 2)
+        if not content_heads or not bodies:
+            return None
+        content_fields = cls._protobuf_fields(content_heads[0])
+        msg_seqs = cls._pb_values(content_fields, 5, 0)
+        body_fields = cls._protobuf_fields(bodies[0])
+        rich_texts = cls._pb_values(body_fields, 1, 2)
+        if not msg_seqs or not rich_texts:
+            return None
+        rich_fields = cls._protobuf_fields(rich_texts[0])
+        for element in cls._pb_values(rich_fields, 2, 2):
+            element_fields = cls._protobuf_fields(element)
+            for common in cls._pb_values(element_fields, 53, 2):
+                common_fields = cls._protobuf_fields(common)
+                service_types = cls._pb_values(common_fields, 1, 0)
+                payloads = cls._pb_values(common_fields, 2, 2)
+                if 46 not in service_types or not payloads:
+                    continue
+                rows = cls._decode_button_extra(payloads[0])
+                if rows:
+                    return {
+                        "botAppid": bot_appid,
+                        "msgSeq": str(msg_seqs[0]),
+                        "rows": rows,
+                    }
+        return None
+
+    @classmethod
+    def _keyboard_from_raw_pb(cls, value: Any) -> Optional[Dict[str, Any]]:
+        """Recover the inline keyboard that LLBot currently drops during message conversion."""
+        raw = cls._raw_pb_bytes(value)
+        if raw is None or len(raw) > cls.MAX_RAW_PB_CHARS // 2:
+            return None
+        appid_match = re.search(rb"https://qqbot\.ugcimg\.cn/(\d+)/", raw)
+        bot_appid = appid_match.group(1).decode("ascii") if appid_match else ""
+        try:
+            root_fields = cls._protobuf_fields(raw)
+        except ValueError:
+            return None
+        messages = [raw, *cls._pb_values(root_fields, 1, 2)]
+        for message in messages:
+            try:
+                keyboard = cls._decode_message_keyboard(message, bot_appid)
+            except (ValueError, IndexError):
+                continue
+            if keyboard is not None:
+                return keyboard
+        return None
+
     def _parse_challenge(self, event) -> Tuple[Optional[CaptchaChallenge], str]:
         message_obj = getattr(event, "message_obj", None)
         group_id = str(
@@ -645,6 +820,16 @@ class CaptchaGuard:
                     candidates.append(node.get("data"))
                 if node.get("inlineKeyboardElement") is not None:
                     candidates.append(node.get("inlineKeyboardElement"))
+                for raw_pb_name in ("raw_pb", "rawPb"):
+                    if node.get(raw_pb_name) is None:
+                        continue
+                    decoded_keyboard = self._keyboard_from_raw_pb(node.get(raw_pb_name))
+                    if decoded_keyboard is not None:
+                        candidates.append(decoded_keyboard)
+                        self._log(
+                            "info",
+                            "[captcha][EVENT] 已从 LLBot raw_pb 恢复 serviceType=46 键盘",
+                        )
 
                 for keyboard in candidates:
                     msg_seq = str(self._first_field(

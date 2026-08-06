@@ -74,6 +74,42 @@ def make_event(msg_seq: str = "88", labels=("🚗", "🐱")):
     return SimpleNamespace(is_at_or_wake_command=True, message_obj=message_obj)
 
 
+def _pb_varint(value: int) -> bytes:
+    encoded = bytearray()
+    while value > 0x7F:
+        encoded.append((value & 0x7F) | 0x80)
+        value >>= 7
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def _pb_uint(field: int, value: int) -> bytes:
+    return _pb_varint(field << 3) + _pb_varint(value)
+
+
+def _pb_bytes(field: int, value: bytes | str) -> bytes:
+    data = value.encode("utf-8") if isinstance(value, str) else value
+    return _pb_varint((field << 3) | 2) + _pb_varint(len(data)) + data
+
+
+def make_llbot_raw_pb_keyboard() -> str:
+    render = _pb_bytes(1, "💻") + _pb_bytes(2, "💻") + _pb_uint(3, 1)
+    action = _pb_uint(1, 1) + _pb_bytes(5, "fixture-callback") + _pb_uint(7, 1)
+    button = _pb_bytes(1, "0_0") + _pb_bytes(2, render) + _pb_bytes(3, action)
+    row = _pb_bytes(1, button)
+    button_extra = _pb_bytes(1, _pb_bytes(1, row))
+    keyboard_common = _pb_uint(1, 46) + _pb_bytes(2, button_extra) + _pb_uint(3, 1)
+    keyboard_element = _pb_bytes(53, keyboard_common)
+
+    markdown = "![captcha](https://qqbot.ugcimg.cn/102074059/fixture.png)"
+    markdown_common = _pb_uint(1, 45) + _pb_bytes(2, _pb_bytes(1, markdown))
+    markdown_element = _pb_bytes(53, markdown_common)
+    rich_text = _pb_bytes(2, markdown_element) + _pb_bytes(2, keyboard_element)
+    content_head = _pb_uint(1, 82) + _pb_uint(5, 5304)
+    message = _pb_bytes(2, content_head) + _pb_bytes(3, _pb_bytes(1, rich_text))
+    return message.hex()
+
+
 async def noop_notify(_message):
     return None
 
@@ -307,6 +343,89 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(challenge)
         self.assertEqual("缺少 bot_appid", error)
+
+    def test_button_payload_decodes_llbot_service_46_keyboard_from_raw_pb(self):
+        event = {
+            "group_id": "1040779831",
+            "message_detail": {
+                "raw_pb": make_llbot_raw_pb_keyboard(),
+            },
+        }
+
+        payload = CaptchaGuard({"enabled": True})._button_payload(event, "💻")
+
+        self.assertEqual(
+            {
+                "group_id": "1040779831",
+                "bot_appid": "102074059",
+                "msg_seq": "5304",
+                "button_id": "0_0",
+                "callback_data": "fixture-callback",
+            },
+            payload,
+        )
+
+    async def test_llbot_raw_pb_captcha_reaches_vision_and_click(self):
+        event = {
+            "group_id": "1040779831",
+            "message_detail": {"raw_pb": make_llbot_raw_pb_keyboard()},
+        }
+        clicks = []
+
+        async def recognize(_kwargs):
+            return "💻"
+
+        async def click(payload):
+            clicks.append(payload)
+            return {"status": "ok", "retcode": 0}
+
+        with patch.object(captcha_module, "AsyncOpenAI", return_value=FakeVisionClient(recognize)):
+            guard = CaptchaGuard({
+                "enabled": True,
+                "vision_api_key": "fixture",
+                "vision_model": "fixture-model",
+            })
+            handled = await guard.handle(
+                "1660315547:1040779831",
+                event,
+                "[@bot](mqqapi://markdown/mention?at_type=1&at_tinyid=1660315547) "
+                "请点击图中第3个表情 "
+                "![captcha](https://qqbot.ugcimg.cn/102074059/fixture.png)",
+                "1660315547",
+                noop_notify,
+                click,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(1, len(clicks))
+        self.assertEqual("102074059", clicks[0]["bot_appid"])
+        self.assertEqual("5304", clicks[0]["msg_seq"])
+        self.assertEqual("0_0", clicks[0]["button_id"])
+        self.assertEqual("fixture-callback", clicks[0]["callback_data"])
+
+    def test_button_payload_decodes_realtime_pushmsg_raw_pb_wrapper(self):
+        wrapped = _pb_bytes(1, bytes.fromhex(make_llbot_raw_pb_keyboard())).hex()
+        event = {
+            "group_id": "1040779831",
+            "message_detail": {"raw": {"rawPb": wrapped}},
+        }
+
+        payload = CaptchaGuard({"enabled": True})._button_payload(event, "💻")
+
+        self.assertIsNotNone(payload)
+        self.assertEqual("0_0", payload["button_id"])
+        self.assertEqual("5304", payload["msg_seq"])
+
+    def test_malformed_raw_pb_is_ignored_without_breaking_normal_parse_error(self):
+        event = {
+            "group_id": "1040779831",
+            "message_detail": {"raw_pb": "0a80"},
+        }
+
+        challenge, error = CaptchaGuard({"enabled": True})._parse_challenge(event)
+
+        self.assertIsNone(challenge)
+        self.assertEqual("缺少 keyboard", error)
 
     async def test_logged_llbot_captcha_shape_reaches_vision_and_click(self):
         labels = ("苹果", "雨伞", "小猫")
