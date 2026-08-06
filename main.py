@@ -532,6 +532,7 @@ class XiaoXiuxianAuto(Star):
         self._cached_bots: Dict[str, Any] = {}
         self._any_bot: Any = None
         self._native_hooked_bot_ids: set[str] = set()
+        self._native_raw_event_hooks: Dict[int, tuple[Any, Any, Any]] = {}
         self._recent_self_commands: Dict[str, float] = {}
         self._recent_official_events: Dict[str, float] = {}
         self._last_native_hook_ts: float = 0.0
@@ -1539,6 +1540,7 @@ class XiaoXiuxianAuto(Star):
         logger.warning("[xiao_xiuxian_auto] 挂载原生钩子失败")
 
     async def terminate(self):
+        self._unhook_native_raw_events()
         if self._tick_task:
             self._tick_task.cancel()
             try: await self._tick_task
@@ -2461,6 +2463,43 @@ class XiaoXiuxianAuto(Star):
         if m: return [{"type": "at", "data": {"qq": m.group(1)}}, {"type": "text", "data": {"text": " " + m.group(2)}}]
         return [{"type": "text", "data": {"text": text}}]
 
+    def _hook_raw_message_sent(self, bot, sid_hint: str = "") -> bool:
+        hooks = getattr(self, "_native_raw_event_hooks", None)
+        if not isinstance(hooks, dict):
+            hooks = {}
+            self._native_raw_event_hooks = hooks
+        bot_id = id(bot)
+        if bot_id in hooks:
+            return True
+
+        original = getattr(bot, "_handle_event", None)
+        if not callable(original):
+            return False
+
+        async def _handle_event_with_message_sent(payload, *args, **kwargs):
+            if isinstance(payload, dict) and payload.get("post_type") == "message_sent":
+                self._remember_bot(payload, bot, sid_hint)
+                await self._handle_native_self(
+                    payload,
+                    force_self=True,
+                    sid_hint=sid_hint,
+                    bot=bot,
+                )
+            return await original(payload, *args, **kwargs)
+
+        bot._handle_event = _handle_event_with_message_sent
+        hooks[bot_id] = (bot, original, _handle_event_with_message_sent)
+        return True
+
+    def _unhook_native_raw_events(self) -> None:
+        hooks = getattr(self, "_native_raw_event_hooks", None)
+        if not isinstance(hooks, dict):
+            return
+        for bot, original, wrapper in list(hooks.values()):
+            if getattr(bot, "_handle_event", None) is wrapper:
+                bot._handle_event = original
+        hooks.clear()
+
     def _hook_native_self_message(self) -> bool:
         try:
             plats = _get_platform_list(self.context)
@@ -2529,6 +2568,9 @@ class XiaoXiuxianAuto(Star):
                         hooked_self = True
                     except Exception as e:
                         logger.debug(f"[xiao_xiuxian_auto] 当前 OneBot 客户端不支持 message_sent 钩子: {e}")
+
+                    if self._hook_raw_message_sent(bot, sid):
+                        hooked_self = True
 
                     self._native_hooked_bot_ids.add(bot_key)
                     hooked_any = True

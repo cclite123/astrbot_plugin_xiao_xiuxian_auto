@@ -489,6 +489,75 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await bot.handlers["message.group"][0](legacy_event)
         self.assertTrue(handled[-1][1])
 
+    async def test_native_hook_intercepts_llbot_event_before_aiocqhttp_drops_it(self):
+        main = _import_main_with_astrbot_stubs()
+
+        class AiocqhttpLikeBot:
+            def __init__(self):
+                self.handlers = {}
+
+            def on_message(self, message_type):
+                return self.on(f"message.{message_type}")
+
+            def on(self, event_name):
+                def register(handler):
+                    self.handlers.setdefault(event_name, []).append(handler)
+                    return handler
+
+                return register
+
+            async def _handle_event(self, payload):
+                post_type = payload["post_type"]
+                try:
+                    detail_type = payload[f"{post_type}_type"]
+                except KeyError:
+                    return None
+                for handler in self.handlers.get(f"{post_type}.{detail_type}", []):
+                    await handler(payload)
+                return None
+
+        bot = AiocqhttpLikeBot()
+        original_handle_event = bot._handle_event
+        platform = type("AiocqhttpAdapter", (), {"bot": bot})()
+        manager = SimpleNamespace(get_insts=lambda: [platform])
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin.context = SimpleNamespace(platform_manager=manager)
+        plugin._cached_bots = {}
+        plugin._any_bot = None
+        plugin._native_hooked = False
+        plugin._native_self_hooked = False
+        plugin._native_official_hooked = False
+        plugin._native_hooked_bot_ids = set()
+        handled = []
+
+        async def handle_self(event, force_self=False, sid_hint=None, bot=None):
+            handled.append((event, force_self, sid_hint, bot))
+
+        async def handle_official(*_args, **_kwargs):
+            return None
+
+        plugin._handle_native_self = handle_self
+        plugin._handle_native_official = handle_official
+
+        self.assertTrue(plugin._hook_native_self_message())
+        llbot_event = {
+            "self_id": 1660315547,
+            "user_id": 1660315547,
+            "group_id": 1040779831,
+            "post_type": "message_sent",
+            "message_type": "group",
+            "raw_message": "绑定此群",
+        }
+
+        await bot._handle_event(llbot_event)
+
+        self.assertEqual(1, len(handled))
+        self.assertTrue(handled[0][1])
+
+        plugin._unhook_native_raw_events()
+
+        self.assertIs(bot._handle_event.__func__, original_handle_event.__func__)
+
     def test_official_event_claim_deduplicates_raw_and_astrbot_wrappers(self):
         main = _import_main_with_astrbot_stubs()
         plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
