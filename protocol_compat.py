@@ -256,14 +256,11 @@ def validate_llbot_inline_keyboard_click_response(result: Any) -> Dict[str, Any]
         click_result = _pb_uint(body, 3)
     except ValueError as exc:
         raise RuntimeError(f"LLBot 按钮点击响应 body 无效：{exc}") from exc
-    if click_result:
-        raise RuntimeError(
-            f"LLBot 按钮点击被 QQ 拒绝：result={click_result} "
-            f"error={_pb_text(body, 5)!r} prompt={_pb_text(body, 4)!r}"
-        )
     return {
         "status": "ok",
         "retcode": 0,
         "provider": "llbot_send_pb",
         "result": int(click_result),
+        "prompt_text": _pb_text(body, 4),
+        "result_message": _pb_text(body, 5),
     }

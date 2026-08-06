@@ -40,12 +40,14 @@ class ProtocolCompatTests(unittest.TestCase):
         self.assertEqual(0, result["result"])
         self.assertEqual("llbot_send_pb", result["provider"])
 
-    def test_validate_llbot_inline_keyboard_click_rejects_business_error(self):
-        with self.assertRaisesRegex(RuntimeError, "result=7"):
-            validate_llbot_inline_keyboard_click_response({
-                "cmd": "OidbSvcTrpcTcp.0x112e_1",
-                "hex": "220a18072a0664656e696564",
-            })
+    def test_validate_llbot_inline_keyboard_click_preserves_nonzero_click_result(self):
+        result = validate_llbot_inline_keyboard_click_response({
+            "cmd": "OidbSvcTrpcTcp.0x112e_1",
+            "hex": "22021802",
+        })
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(2, result["result"])
 
     def test_validate_llbot_inline_keyboard_click_rejects_oidb_error(self):
         with self.assertRaisesRegex(RuntimeError, "error_code=5"):

@@ -683,7 +683,7 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 if action == "send_pb":
                     return {
                         "cmd": payload["cmd"],
-                        "hex": "08ae22100122021800",
+                        "hex": "08ae22100122021802",
                     }
                 raise AssertionError(f"unexpected action: {action}")
 

@@ -267,8 +267,8 @@ LLBot 同样需要设置 `debug: true`，否则点击参数不完整。
 
 > **LLBot 兼容：** 当前 LLBot 官方版本尚未提供 NapCat 的
 > `click_inline_keyboard_button` 扩展 action。插件检测到 LLBot 返回 1404“API 不存在”时，
-> 会自动通过 LLBot 的 `send_pb` 调用 QQ OIDB `0x112e_1` 提交按钮点击，并严格校验
-> OIDB 错误码和点击结果；其他点击错误不会触发该回退。
+> 会自动通过 LLBot 的 `send_pb` 调用 QQ OIDB `0x112e_1` 提交按钮点击，校验 OIDB
+> 传输错误并记录点击结果；验证码是否正确仍以官方后续回执为准。其他点击错误不会触发该回退。
 
 小小发送“请点击图中第…个表情”的验证码并 @ 当前机器人时，插件会暂停本群所有自动指令。配置 `captcha.vision_api_key`、`captcha.vision_base_url` 和 `captcha.vision_model` 后，插件会解析内联键盘候选项，将候选标签一并交给兼容 OpenAI 的视觉模型识别，再通过 OneBot 点击对应按钮。
 
