@@ -663,6 +663,100 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("click_inline_keyboard_button", client.calls[0][0])
         self.assertEqual(1660315547, client.calls[0][1]["self_id"])
 
+    async def test_captcha_click_falls_back_to_llbot_send_pb_when_action_is_missing(self):
+        main = _import_main_with_astrbot_stubs()
+
+        class MissingActionError(RuntimeError):
+            status = "failed"
+            retcode = 1404
+            message = "click_inline_keyboard_button API 不存在"
+            wording = message
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **payload):
+                self.calls.append((action, payload))
+                if action == "click_inline_keyboard_button":
+                    raise MissingActionError("click_inline_keyboard_button API 不存在")
+                if action == "send_pb":
+                    return {
+                        "cmd": payload["cmd"],
+                        "hex": "08ae22100122021800",
+                    }
+                raise AssertionError(f"unexpected action: {action}")
+
+        class FakeGuard:
+            async def handle(self, _key, _event, _raw_text, _self_id, _notify, click, **_kwargs):
+                await click({
+                    "group_id": "1040779831",
+                    "bot_appid": "102074059",
+                    "msg_seq": "5389",
+                    "button_id": "button-3",
+                    "callback_data": "secret-callback",
+                })
+                return True
+
+        client = FakeClient()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin._captcha_for_key = lambda _key: FakeGuard()
+        plugin._find_client_by_self_id = lambda _self_id: client
+        plugin._raw_send_by_key = lambda *_args: None
+
+        handled = await plugin._handle_captcha(
+            "1660315547:1040779831",
+            object(),
+            "请点击图中第3个表情对应的按钮",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            ["click_inline_keyboard_button", "send_pb"],
+            [action for action, _payload in client.calls],
+        )
+        send_pb_payload = client.calls[1][1]
+        self.assertEqual("OidbSvcTrpcTcp.0x112e_1", send_pb_payload["cmd"])
+        self.assertEqual(1660315547, send_pb_payload["self_id"])
+        self.assertIsInstance(send_pb_payload["hex"], str)
+        self.assertNotIn("secret-callback", send_pb_payload["hex"])
+
+    async def test_captcha_click_does_not_fall_back_for_other_onebot_failures(self):
+        main = _import_main_with_astrbot_stubs()
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **payload):
+                self.calls.append((action, payload))
+                return {"status": "failed", "retcode": 1400, "message": "invalid params"}
+
+        class FakeGuard:
+            async def handle(self, _key, _event, _raw_text, _self_id, _notify, click, **_kwargs):
+                await click({
+                    "group_id": "1040779831",
+                    "bot_appid": "102074059",
+                    "msg_seq": "5389",
+                    "button_id": "button-3",
+                    "callback_data": "secret-callback",
+                })
+
+        client = FakeClient()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin._captcha_for_key = lambda _key: FakeGuard()
+        plugin._find_client_by_self_id = lambda _self_id: client
+        plugin._raw_send_by_key = lambda *_args: None
+
+        with self.assertRaisesRegex(RuntimeError, "未明确接受点击请求"):
+            await plugin._handle_captcha(
+                "1660315547:1040779831",
+                object(),
+                "请点击图中第3个表情对应的按钮",
+            )
+
+        self.assertEqual(["click_inline_keyboard_button"], [call[0] for call in client.calls])
+
     async def test_captcha_get_msg_fallback_routes_by_message_and_self_id(self):
         main = _import_main_with_astrbot_stubs()
 

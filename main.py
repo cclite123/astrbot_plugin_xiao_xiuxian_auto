@@ -41,7 +41,14 @@ try:
     from .linjie import LinjieUpgradeController, format_money as format_linjie_money
     from .endless import EndlessTowerController
     from .captcha_guard import CaptchaGuard, is_click_action_accepted
-    from .protocol_compat import event_field, event_fingerprint, normalize_qq_id as _normalize_qq_id
+    from .protocol_compat import (
+        build_llbot_inline_keyboard_click,
+        event_field,
+        event_fingerprint,
+        is_onebot_action_missing,
+        normalize_qq_id as _normalize_qq_id,
+        validate_llbot_inline_keyboard_click_response,
+    )
 except ImportError:
     from storage import JsonStore, make_key
     from bounty import BountyController
@@ -57,7 +64,14 @@ except ImportError:
     from linjie import LinjieUpgradeController, format_money as format_linjie_money
     from endless import EndlessTowerController
     from captcha_guard import CaptchaGuard, is_click_action_accepted
-    from protocol_compat import event_field, event_fingerprint, normalize_qq_id as _normalize_qq_id
+    from protocol_compat import (
+        build_llbot_inline_keyboard_click,
+        event_field,
+        event_fingerprint,
+        is_onebot_action_missing,
+        normalize_qq_id as _normalize_qq_id,
+        validate_llbot_inline_keyboard_click_response,
+    )
 
 PLUGIN_NAME = "astrbot_plugin_xiao_xiuxian_auto"
 OFFICIAL_BOT_QQ_DEFAULT = "3889001741"
@@ -2347,9 +2361,19 @@ class XiaoXiuxianAuto(Star):
                 payload,
                 self_id=self_id,
             )
-            if not is_click_action_accepted(result):
+            if is_click_action_accepted(result):
+                return result
+            if not is_onebot_action_missing(result, "click_inline_keyboard_button"):
                 raise RuntimeError(f"OneBot 未明确接受点击请求：{result}")
-            return result
+
+            command, request_hex = build_llbot_inline_keyboard_click(payload)
+            fallback_result = await self._do_send_action(
+                client,
+                "send_pb",
+                {"cmd": command, "hex": request_hex},
+                self_id=self_id,
+            )
+            return validate_llbot_inline_keyboard_click_response(fallback_result)
 
         async def fetch_message():
             self_id = self._self_id_from_key(key)

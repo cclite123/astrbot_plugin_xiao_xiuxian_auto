@@ -37,7 +37,15 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
             main_text,
         )
         self.assertIn(
-            'if not is_click_action_accepted(result):',
+            'if is_click_action_accepted(result):',
+            main_text,
+        )
+        self.assertIn(
+            'if not is_onebot_action_missing(result, "click_inline_keyboard_button"):',
+            main_text,
+        )
+        self.assertIn(
+            'return validate_llbot_inline_keyboard_click_response(fallback_result)',
             main_text,
         )
         self.assertNotIn(
