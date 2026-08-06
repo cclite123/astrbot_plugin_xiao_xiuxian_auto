@@ -380,6 +380,69 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("ll-secret-3", clicks[0]["callback_data"])
         self.assertNotIn("缺少 keyboard", "\n".join(logger.records))
 
+    async def test_missing_live_keyboard_uses_get_msg_detail_fallback(self):
+        event = SimpleNamespace(
+            is_at_or_wake_command=True,
+            message_obj=SimpleNamespace(
+                group_id="1040779831",
+                self_id="1660315547",
+                raw_message={
+                    "message_id": 901,
+                    "message_seq": 902,
+                    "message": [{"type": "text", "data": {"text": "请点击图中第1个表情"}}],
+                },
+            ),
+        )
+        detail = {
+            "group_id": 1040779831,
+            "message_id": 901,
+            "message_seq": 902,
+            "bot_appid": "detail-app-1",
+            "keyboard": {
+                "rows": [
+                    {
+                        "buttons": [
+                            {"label": "小猫", "button_id": "detail-button-1", "data": "detail-secret"}
+                        ]
+                    }
+                ]
+            },
+        }
+        clicks = []
+        fetches = []
+
+        async def recognize(_kwargs):
+            return "小猫"
+
+        async def fetch_message():
+            fetches.append(True)
+            return detail
+
+        async def click(payload):
+            clicks.append(payload)
+            return {"status": "ok", "retcode": 0}
+
+        with patch.object(captcha_module, "AsyncOpenAI", return_value=FakeVisionClient(recognize)):
+            guard = CaptchaGuard({
+                "enabled": True,
+                "vision_api_key": "fixture",
+                "vision_model": "fixture-model",
+            })
+            handled = await guard.handle(
+                "1660315547:1040779831",
+                event,
+                "[At:1660315547] 请点击图中第1个表情 "
+                "![captcha](https://qqbot.ugcimg.cn/fallback.png)",
+                "1660315547",
+                noop_notify,
+                click,
+                fetch_message=fetch_message,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual([True], fetches)
+        self.assertEqual("detail-button-1", clicks[0]["button_id"])
+
     async def test_model_receives_button_labels_and_unmatched_name_falls_back_to_first(self):
         async def answer_with_name(_kwargs):
             return "拖鞋"

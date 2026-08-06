@@ -208,6 +208,8 @@ class CaptchaGuard:
         self_id: str,
         notify: Callable[[str], Awaitable[None]],
         click: Callable[[Dict[str, str]], Awaitable[Any]],
+        *,
+        fetch_message: Optional[Callable[[], Awaitable[Any]]] = None,
     ) -> bool:
         if not self.enabled:
             return False
@@ -235,6 +237,7 @@ class CaptchaGuard:
                 match,
                 notify,
                 click,
+                fetch_message,
             )
         finally:
             self._log(
@@ -252,6 +255,7 @@ class CaptchaGuard:
         match,
         notify: Callable[[str], Awaitable[None]],
         click: Callable[[Dict[str, str]], Awaitable[Any]],
+        fetch_message: Optional[Callable[[], Awaitable[Any]]],
     ) -> bool:
         image = self.IMAGE_RE.search(raw_text)
         if not image:
@@ -261,10 +265,26 @@ class CaptchaGuard:
             return True
 
         challenge, parse_error = self._parse_challenge(event)
+        parse_source = event
+        if challenge is None and fetch_message is not None:
+            self._log("info", "[captcha][EVENT] 实时事件缺少完整键盘，尝试通过 get_msg 补取")
+            try:
+                detail = await fetch_message()
+            except Exception as exc:
+                detail = None
+                self._log("warning", "[captcha][EVENT] get_msg 补取失败 error=%s", self._redact_text(exc))
+            if detail is not None:
+                group_id = str(key).split(":", 1)[1] if ":" in str(key) else ""
+                parse_source = {
+                    "group_id": group_id,
+                    "message_detail": detail,
+                }
+                challenge, parse_error = self._parse_challenge(parse_source)
         if challenge is None:
             self.pause(key, parse_error, phase="invalid_challenge")
             await notify(f"⚠️ 验证码键盘字段不完整：{parse_error}；任务保持暂停，完成验证后发送「继续任务」。")
             self._log("warning", "[captcha] 验证码键盘字段不完整 key=%s detail=%s", key, parse_error)
+            self._log("warning", "[captcha][EVENT] 脱敏事件结构=%r", self._event_shape(parse_source))
             return True
 
         labels = [button.label for button in challenge.buttons]
@@ -475,6 +495,42 @@ class CaptchaGuard:
 
         walk(root)
         return nodes
+
+    def _event_shape(self, event) -> Dict[str, Any]:
+        message_obj = getattr(event, "message_obj", None)
+        roots = (
+            ("message_obj.raw_message", getattr(message_obj, "raw_message", None)),
+            ("message_obj.message", getattr(message_obj, "message", None)),
+            ("event.raw_message", getattr(event, "raw_message", None)),
+            ("event.message", getattr(event, "message", None)),
+            ("event", event if isinstance(event, dict) else None),
+        )
+        root_shapes = []
+        segment_types = set()
+        node_keys = set()
+        for name, root in roots:
+            if root is None:
+                continue
+            shape: Dict[str, Any] = {"name": name, "type": type(root).__name__}
+            if isinstance(root, dict):
+                shape["keys"] = sorted(str(key) for key in root.keys())
+            elif isinstance(root, (list, tuple)):
+                shape["length"] = len(root)
+            root_shapes.append(shape)
+            for node in self._walk_nodes(root)[:64]:
+                keys = tuple(sorted(str(key) for key in node.keys()))
+                if keys:
+                    node_keys.add(keys)
+                segment_type = node.get("type")
+                if isinstance(segment_type, str):
+                    segment_types.add(segment_type)
+        return {
+            "event_type": type(event).__name__,
+            "message_obj_type": type(message_obj).__name__ if message_obj is not None else "none",
+            "roots": root_shapes,
+            "segment_types": sorted(segment_types),
+            "node_keys": sorted(node_keys)[:32],
+        }
 
     def _parse_challenge(self, event) -> Tuple[Optional[CaptchaChallenge], str]:
         message_obj = getattr(event, "message_obj", None)

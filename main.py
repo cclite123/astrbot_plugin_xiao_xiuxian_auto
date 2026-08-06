@@ -2351,7 +2351,35 @@ class XiaoXiuxianAuto(Star):
                 raise RuntimeError(f"OneBot 未明确接受点击请求：{result}")
             return result
 
-        return await guard.handle(key, event, raw_text, self._self_id_from_key(key), notify, click)
+        async def fetch_message():
+            self_id = self._self_id_from_key(key)
+            client = self._find_client_by_self_id(self_id)
+            if client is None:
+                raise RuntimeError("未找到 OneBot 客户端")
+            message_id = event_field(event, "message_id")
+            if message_id is None or not str(message_id).strip():
+                raise RuntimeError("事件缺少 message_id，无法调用 get_msg")
+            result = await self._do_send_action(
+                client,
+                "get_msg",
+                {"message_id": message_id},
+                self_id=self_id,
+            )
+            if isinstance(result, Exception):
+                raise result
+            if not isinstance(result, dict):
+                raise RuntimeError(f"get_msg 未返回消息对象：{result}")
+            return result
+
+        return await guard.handle(
+            key,
+            event,
+            raw_text,
+            self._self_id_from_key(key),
+            notify,
+            click,
+            fetch_message=fetch_message,
+        )
 
     async def _raw_send_by_key(self, key: str, text: str) -> None:
 

@@ -636,7 +636,7 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 return {"status": "ok", "retcode": 0}
 
         class FakeGuard:
-            async def handle(self, _key, _event, _raw_text, _self_id, _notify, click):
+            async def handle(self, _key, _event, _raw_text, _self_id, _notify, click, **_kwargs):
                 await click({
                     "group_id": "1040779831",
                     "bot_appid": "app-1",
@@ -660,6 +660,54 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual("click_inline_keyboard_button", client.calls[0][0])
+        self.assertEqual(1660315547, client.calls[0][1]["self_id"])
+
+    async def test_captcha_get_msg_fallback_routes_by_message_and_self_id(self):
+        main = _import_main_with_astrbot_stubs()
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **payload):
+                self.calls.append((action, payload))
+                return {"message_id": payload["message_id"], "keyboard": {}}
+
+        class FakeGuard:
+            async def handle(
+                self,
+                _key,
+                _event,
+                _raw_text,
+                _self_id,
+                _notify,
+                _click,
+                *,
+                fetch_message,
+            ):
+                detail = await fetch_message()
+                return bool(detail)
+
+        client = FakeClient()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin._captcha_for_key = lambda _key: FakeGuard()
+        plugin._find_client_by_self_id = lambda _self_id: client
+        plugin._raw_send_by_key = lambda *_args: None
+        event = {
+            "self_id": 1660315547,
+            "group_id": 1040779831,
+            "message_id": 901,
+        }
+
+        handled = await plugin._handle_captcha(
+            "1660315547:1040779831",
+            event,
+            "请点击图中第3个表情对应的按钮",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual("get_msg", client.calls[0][0])
+        self.assertEqual(901, client.calls[0][1]["message_id"])
         self.assertEqual(1660315547, client.calls[0][1]["self_id"])
 
     async def test_account_business_controllers_use_isolated_config_and_files(self):
