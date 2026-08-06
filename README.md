@@ -96,12 +96,14 @@ xiaoxiuxian/
    ```json
    {
      "messageFormat": "array",
-     "reportSelfMessage": true
+     "reportSelfMessage": true,
+     "debug": true
    }
    ```
 
    `reportSelfMessage` 必须为 `true`。插件通过 LLBot 上报的 `message_sent` 事件识别机器人
-   自己发送的绑定和控制命令；关闭后，这些命令不会进入插件。
+   自己发送的绑定和控制命令；关闭后，这些命令不会进入插件。验证码还要求 `debug` 为
+   `true`，否则 LLBot 不会上报点击所需的 `botAppid` 原始字段。
 
 3. **编辑配置文件**
 
@@ -259,8 +261,13 @@ xiaoxiuxian/
 
 ## 验证码守卫
 
-> **当前限制：** 新版 AstrBot 中验证码识别和内联按钮回调链路已经失效，本次 LLBot
-> 兼容不包含这两项修复。普通文本指令和官方文本回执不受此限制。
+插件兼容 AstrBot 4.27.2 保留的原始 OneBot 事件，并支持 NapCat 的嵌套键盘、OneBot
+`keyboard` 消息段及 LLBot 的 `inlineKeyboardElement`。NapCat 需要开启连接的 `debug`，
+LLBot 同样需要设置 `debug: true`，否则点击参数不完整。
+
+> **LLBot 限制：** 当前 LLBot 官方版本尚未提供 NapCat 的
+> `click_inline_keyboard_button` 扩展 action。插件可以解析 LLBot 验证码并完成视觉识别，
+> 但自动点击仍需 LLBot 本体实现该 action；在此之前会保持任务暂停并记录 action 错误。
 
 小小发送“请点击图中第…个表情”的验证码并 @ 当前机器人时，插件会暂停本群所有自动指令。配置 `captcha.vision_api_key`、`captcha.vision_base_url` 和 `captcha.vision_model` 后，插件会解析内联键盘候选项，将候选标签一并交给兼容 OpenAI 的视觉模型识别，再通过 OneBot 点击对应按钮。
 

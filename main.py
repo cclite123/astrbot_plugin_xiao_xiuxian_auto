@@ -2341,7 +2341,12 @@ class XiaoXiuxianAuto(Star):
             client = self._find_client_by_self_id(self_id)
             if client is None:
                 raise RuntimeError("未找到 OneBot 客户端")
-            result = await self._do_send_action(client, "click_inline_keyboard_button", payload)
+            result = await self._do_send_action(
+                client,
+                "click_inline_keyboard_button",
+                payload,
+                self_id=self_id,
+            )
             if not is_click_action_accepted(result):
                 raise RuntimeError(f"OneBot 未明确接受点击请求：{result}")
             return result
@@ -2370,12 +2375,22 @@ class XiaoXiuxianAuto(Star):
         elif result:
             logger.warning(f"[xiao_xiuxian_auto] 发送消息失败: {result}")
 
-    async def _do_send_action(self, client, action: str, payload: Dict[str, Any]):
+    async def _do_send_action(
+        self,
+        client,
+        action: str,
+        payload: Dict[str, Any],
+        self_id: Optional[str] = None,
+    ):
+        action_payload = dict(payload)
+        normalized_self_id = _normalize_qq_id(self_id)
+        if normalized_self_id:
+            action_payload["self_id"] = int(normalized_self_id)
         for target in (getattr(client, "call_action", None), getattr(getattr(client, "api", None), "call_action", None)):
             if target is None:
                 continue
             try:
-                return await target(action, **payload)
+                return await target(action, **action_payload)
             except Exception as exc:
                 last_error = exc
         return locals().get("last_error", RuntimeError("没有可用的 OneBot action 接口"))

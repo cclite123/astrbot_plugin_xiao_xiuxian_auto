@@ -33,7 +33,7 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
         main_text = (ROOT / "main.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            'return await target(action, **payload)',
+            'return await target(action, **action_payload)',
             main_text,
         )
         self.assertIn(
@@ -41,7 +41,7 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
             main_text,
         )
         self.assertNotIn(
-            'await target(action, **payload)\n                return True',
+            'await target(action, **action_payload)\n                return True',
             main_text,
         )
 

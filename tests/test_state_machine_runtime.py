@@ -624,6 +624,44 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(10001, first.calls[0][1]["self_id"])
 
+    async def test_captcha_click_routes_action_by_self_id(self):
+        main = _import_main_with_astrbot_stubs()
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def call_action(self, action, **payload):
+                self.calls.append((action, payload))
+                return {"status": "ok", "retcode": 0}
+
+        class FakeGuard:
+            async def handle(self, _key, _event, _raw_text, _self_id, _notify, click):
+                await click({
+                    "group_id": "1040779831",
+                    "bot_appid": "app-1",
+                    "msg_seq": "902",
+                    "button_id": "button-1",
+                    "callback_data": "secret",
+                })
+                return True
+
+        client = FakeClient()
+        plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)
+        plugin._captcha_for_key = lambda _key: FakeGuard()
+        plugin._find_client_by_self_id = lambda _self_id: client
+        plugin._raw_send_by_key = lambda *_args: None
+
+        handled = await plugin._handle_captcha(
+            "1660315547:1040779831",
+            object(),
+            "请点击图中第3个表情对应的按钮",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual("click_inline_keyboard_button", client.calls[0][0])
+        self.assertEqual(1660315547, client.calls[0][1]["self_id"])
+
     async def test_account_business_controllers_use_isolated_config_and_files(self):
         main = _import_main_with_astrbot_stubs()
         plugin = main.XiaoXiuxianAuto.__new__(main.XiaoXiuxianAuto)

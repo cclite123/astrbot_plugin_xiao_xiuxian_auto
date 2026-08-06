@@ -302,7 +302,7 @@ class CaptchaGuard:
         if not self.api_key or not self.model:
             self.pause(
                 key,
-                "视觉模型 API Key 或模型 ID 未配置",
+                "openai 兼容视觉模型 API Key 或模型 ID 未配置",
                 phase="configuration_error",
                 msg_seq=challenge.msg_seq,
             )
@@ -491,45 +491,73 @@ class CaptchaGuard:
             getattr(event, "data", None),
             event if isinstance(event, dict) else None,
         ]
-        missing = {"group_id"} if not group_id else set()
+        base_missing = {"group_id"} if not group_id else set()
+        best_missing: Optional[set[str]] = None
         for root in roots:
             for node in self._walk_nodes(root):
-                keyboard = node.get("keyboard")
-                if keyboard is None:
-                    continue
-                msg_seq = str(
-                    node.get("msgSeq") or node.get("msg_seq") or node.get("messageSeq")
-                    or node.get("message_seq") or node.get("msgId") or node.get("msg_id") or ""
-                )
-                bot_appid = str(
-                    node.get("botAppid") or node.get("bot_appid") or node.get("botAppId")
-                    or node.get("appid") or node.get("app_id") or ""
-                )
-                buttons = self._buttons_from_keyboard(keyboard)
-                candidate_missing = set(missing)
-                if not bot_appid:
-                    candidate_missing.add("bot_appid")
-                if not msg_seq:
-                    candidate_missing.add("msg_seq")
-                if not buttons:
-                    candidate_missing.add("buttons")
-                if not candidate_missing:
-                    return CaptchaChallenge(group_id, bot_appid, msg_seq, tuple(buttons)), ""
-                missing.update(candidate_missing)
-        return None, "缺少 " + ", ".join(sorted(missing or {"keyboard"}))
+                candidates = []
+                if node.get("keyboard") is not None:
+                    candidates.append(node.get("keyboard"))
+                if node.get("type") == "keyboard" and isinstance(node.get("data"), dict):
+                    candidates.append(node.get("data"))
+                if node.get("inlineKeyboardElement") is not None:
+                    candidates.append(node.get("inlineKeyboardElement"))
+
+                for keyboard in candidates:
+                    msg_seq = str(self._first_field(
+                        (keyboard, node, root),
+                        ("msgSeq", "msg_seq", "messageSeq", "message_seq", "msgId", "msg_id"),
+                    ) or "")
+                    bot_appid = str(self._first_field(
+                        (keyboard, node, root),
+                        ("botAppid", "bot_appid", "botAppId", "appid", "app_id"),
+                    ) or "")
+                    buttons = self._buttons_from_keyboard(keyboard)
+                    candidate_missing = set(base_missing)
+                    if not bot_appid:
+                        candidate_missing.add("bot_appid")
+                    if not msg_seq:
+                        candidate_missing.add("msg_seq")
+                    if not buttons:
+                        candidate_missing.add("buttons")
+                    if not candidate_missing:
+                        return CaptchaChallenge(group_id, bot_appid, msg_seq, tuple(buttons)), ""
+                    if best_missing is None or len(candidate_missing) < len(best_missing):
+                        best_missing = candidate_missing
+        return None, "缺少 " + ", ".join(sorted(best_missing or {"keyboard"}))
+
+    @staticmethod
+    def _first_field(containers, names):
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            for name in names:
+                value = container.get(name)
+                if value is not None and str(value).strip():
+                    return value
+        return None
 
     def _buttons_from_keyboard(self, keyboard) -> List[CaptchaButton]:
         buttons: List[CaptchaButton] = []
         seen_buttons = set()
         for node in self._walk_nodes(keyboard):
-            label = str(node.get("label") or node.get("text") or node.get("name") or node.get("title") or "")
+            render_data = node.get("render_data") or node.get("renderData")
+            if not isinstance(render_data, dict):
+                render_data = {}
+            action = node.get("action")
+            if not isinstance(action, dict):
+                action = {}
+            label = str(
+                node.get("label") or node.get("text") or node.get("name")
+                or node.get("title") or render_data.get("label") or ""
+            )
             button_id = str(
                 node.get("id") or node.get("buttonId") or node.get("button_id")
                 or node.get("buttonID") or node.get("index") or ""
             )
             callback = str(
                 node.get("data") or node.get("callbackData") or node.get("callback_data")
-                or node.get("value") or node.get("actionData") or ""
+                or node.get("value") or node.get("actionData") or action.get("data") or ""
             )
             if not label or not button_id or not callback:
                 continue

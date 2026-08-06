@@ -219,6 +219,167 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("app-1", payload["bot_appid"])
         self.assertEqual("b-0", payload["button_id"])
 
+    def test_button_payload_reads_llbot_keyboard_segment_and_debug_raw_metadata(self):
+        button = {
+            "id": "ll-button-1",
+            "render_data": {"label": "小猫", "visited_label": "小猫", "style": 1},
+            "action": {"type": 1, "data": "ll-callback-secret"},
+        }
+        event = SimpleNamespace(
+            is_at_or_wake_command=True,
+            message_obj=SimpleNamespace(
+                group_id="1040779831",
+                self_id="1660315547",
+                raw_message={
+                    "group_id": 1040779831,
+                    "message_id": 901,
+                    "message_seq": 902,
+                    "message": [
+                        {"type": "keyboard", "data": {"rows": [{"buttons": [button]}]}},
+                    ],
+                    "raw": {
+                        "msgSeq": 902,
+                        "elements": [
+                            {
+                                "inlineKeyboardElement": {
+                                    "botAppid": "ll-app-1",
+                                    "rows": [
+                                        {
+                                            "buttons": [
+                                                {
+                                                    "id": "ll-button-1",
+                                                    "label": "小猫",
+                                                    "data": "ll-callback-secret",
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                }
+                            }
+                        ],
+                    },
+                },
+            ),
+        )
+
+        payload = CaptchaGuard({"enabled": True})._button_payload(event, "小猫")
+
+        self.assertEqual(
+            {
+                "group_id": "1040779831",
+                "bot_appid": "ll-app-1",
+                "msg_seq": "902",
+                "button_id": "ll-button-1",
+                "callback_data": "ll-callback-secret",
+            },
+            payload,
+        )
+
+    def test_llbot_keyboard_without_debug_raw_reports_missing_bot_appid(self):
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(
+                group_id="1040779831",
+                raw_message={
+                    "message_seq": 902,
+                    "message": [
+                        {
+                            "type": "keyboard",
+                            "data": {
+                                "rows": [
+                                    {
+                                        "buttons": [
+                                            {
+                                                "id": "ll-button-1",
+                                                "render_data": {"label": "小猫"},
+                                                "action": {"type": 1, "data": "ll-secret"},
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                },
+            )
+        )
+
+        challenge, error = CaptchaGuard({"enabled": True})._parse_challenge(event)
+
+        self.assertIsNone(challenge)
+        self.assertEqual("缺少 bot_appid", error)
+
+    async def test_logged_llbot_captcha_shape_reaches_vision_and_click(self):
+        labels = ("苹果", "雨伞", "小猫")
+        buttons = [
+            {
+                "id": f"ll-button-{index}",
+                "render_data": {"label": label},
+                "action": {"type": 1, "data": f"ll-secret-{index}"},
+            }
+            for index, label in enumerate(labels, start=1)
+        ]
+        event = SimpleNamespace(
+            is_at_or_wake_command=True,
+            message_obj=SimpleNamespace(
+                group_id="1040779831",
+                self_id="1660315547",
+                raw_message={
+                    "message_seq": 902,
+                    "message": [
+                        {"type": "keyboard", "data": {"rows": [{"buttons": buttons}]}},
+                    ],
+                    "raw": {
+                        "elements": [
+                            {
+                                "inlineKeyboardElement": {
+                                    "botAppid": "ll-app-1",
+                                    "rows": [{"buttons": buttons}],
+                                }
+                            }
+                        ]
+                    },
+                },
+            ),
+        )
+        raw_text = (
+            "[@星之卡比](mqqapi://markdown/mention?at_type=1&at_tinyid=1660315547)"
+            "![小小 #1100px #150px](https://qqbot.ugcimg.cn/captcha.png)"
+            "请点击图中第3个表情对应的按钮"
+        )
+        logger = RecordingLogger()
+        clicks = []
+
+        async def recognize_third(_kwargs):
+            return "小猫"
+
+        async def click(payload):
+            clicks.append(payload)
+            return {"status": "ok", "retcode": 0}
+
+        with patch.object(captcha_module, "AsyncOpenAI", return_value=FakeVisionClient(recognize_third)):
+            guard = CaptchaGuard(
+                {
+                    "enabled": True,
+                    "vision_api_key": "fixture",
+                    "vision_model": "fixture-model",
+                    "debug_print": True,
+                },
+                logger=logger,
+            )
+            handled = await guard.handle(
+                "1660315547:1040779831",
+                event,
+                raw_text,
+                "1660315547",
+                noop_notify,
+                click,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual("ll-button-3", clicks[0]["button_id"])
+        self.assertEqual("ll-secret-3", clicks[0]["callback_data"])
+        self.assertNotIn("缺少 keyboard", "\n".join(logger.records))
+
     async def test_model_receives_button_labels_and_unmatched_name_falls_back_to_first(self):
         async def answer_with_name(_kwargs):
             return "拖鞋"
