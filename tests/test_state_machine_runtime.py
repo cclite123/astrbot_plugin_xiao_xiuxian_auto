@@ -1048,6 +1048,10 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             plugin.data_dir = temp_dir
+            (Path(temp_dir) / "alchemy_page_index.json").write_text(
+                json.dumps({"七星草": 1}, ensure_ascii=False),
+                encoding="utf-8",
+            )
             first = plugin._controller("bounty", "111:group")
             second = plugin._controller("bounty", "222:group")
             first_endless = plugin._controller("endless", "111:group")
@@ -1066,6 +1070,9 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("111", first_inventory.runtime_path)
             self.assertIn("222", second_inventory.runtime_path)
             self.assertNotEqual(first_alchemy.herb_max_prices_path, second_alchemy.herb_max_prices_path)
+            self.assertNotEqual(first_alchemy.page_index_path, second_alchemy.page_index_path)
+            self.assertEqual({"七星草": 1}, first_alchemy._read_page_index())
+            self.assertEqual({"七星草": 1}, second_alchemy._read_page_index())
 
     async def test_herb_price_page_api_returns_groups_for_selected_account(self):
         main = _import_main_with_astrbot_stubs()

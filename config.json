@@ -136,7 +136,7 @@
     "alchemy_send_interval_sec": 1.2,
     "_comment_min_profit_6pill": "6 丹利润最低阈值，单位为万；低于该值不纳入炼丹。",
     "min_profit_6pill": 130,
-    "_comment_page_index_cache_enabled": "是否启用药材页码索引缓存；页码稳定时可减少每次全量查 1-8 页。",
+    "_comment_page_index_cache_enabled": "是否启用固定药材页码目录；内置目录用于快速定位，实扫结果按账号校正，目录失效且无候选时会补扫剩余页。",
     "page_index_cache_enabled": true,
     "_comment_batch_mode_plan_lock": "批量模式是否使用方案锁；选定丹方后不因“不是最优”切换，只判断是否仍达利润阈值。",
     "batch_mode_plan_lock": true,

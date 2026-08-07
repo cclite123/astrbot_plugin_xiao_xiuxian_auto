@@ -193,6 +193,9 @@ class AutoAlchemyOptimizer:
     )
     MARKET_LINK_RE = re.compile(r"\[(?P<name>[^\]]+)\]\((?P<url>mqqapi://aio/inlinecmd\?[^)]*)\)", re.S)
     FORMULA_REUSE_PRICE_TOLERANCE = 100.0
+    HERB_NAME_ALIASES = {
+        "苦蔓藤": "苦曼藤",
+    }
 
     def __init__(
         self,
@@ -201,6 +204,7 @@ class AutoAlchemyOptimizer:
         recipe_path: str,
         snapshot_path: str = "",
         page_index_path: str = "",
+        page_index_catalog_path: str = "",
         config: Optional[dict] = None,
         logger=None,
     ):
@@ -214,6 +218,7 @@ class AutoAlchemyOptimizer:
             self.page_index_path = os.path.join(os.path.dirname(self.snapshot_path), "alchemy_page_index.json")
         else:
             self.page_index_path = ""
+        self.page_index_catalog_path = str(page_index_catalog_path or "").strip()
         self.log = logger
 
         self.enabled = bool(cfg.get("enabled", True))
@@ -447,7 +452,8 @@ class AutoAlchemyOptimizer:
         name = str(name or "").strip()
         name = cls.ZERO_WIDTH_RE.sub("", name)
         name = re.sub(r"\s+", "", name)
-        return name.replace("：", ":").replace("，", ",")
+        name = name.replace("：", ":").replace("，", ",")
+        return cls.HERB_NAME_ALIASES.get(name, name)
 
     @classmethod
     def _build_herb_properties(cls) -> Dict[str, Dict[str, Any]]:
@@ -494,7 +500,7 @@ class AutoAlchemyOptimizer:
                 main_value = 2 ** (grade - 1)
                 assist_value = 2 ** grade
                 for idx, name in enumerate(names):
-                    out[name] = {
+                    out[cls.normalize_name(name)] = {
                         "grade": grade,
                         "main": f"{main_pattern[idx]}{main_value}",
                         "guide": f"{guide_pattern[idx]}{main_value}",
@@ -511,15 +517,18 @@ class AutoAlchemyOptimizer:
             return "❌ 背包解析器不可用，无法读取药材背包。"
         initial_prices: Dict[str, float] = {}
         initial_buy_commands: Dict[str, str] = {}
-        initial_pages: Dict[str, int] = {}
+        initial_pages: Dict[str, int] = self._read_page_index()
         scan_pages = list(range(1, self.max_page + 1))
         fast_note = ""
         if self.batch_fast_start_from_snapshot:
-            cached = self._read_snapshot()
+            cached = self._read_snapshot(allow_stale=True)
             if cached and cached.get("prices") and cached.get("pages_by_name"):
                 initial_prices = dict(cached.get("prices") or {})
                 initial_buy_commands = dict(cached.get("buy_commands") or {})
-                initial_pages = dict(cached.get("pages_by_name") or {})
+                initial_pages = {
+                    **dict(cached.get("pages_by_name") or {}),
+                    **self._read_page_index(),
+                }
                 pages = self._batch_pages_from_cached_snapshot(initial_prices, initial_buy_commands, initial_pages)
                 if pages and self.batch_refresh_selected_pages:
                     scan_pages = pages
@@ -530,6 +539,8 @@ class AutoAlchemyOptimizer:
                     )
                     if age > 0:
                         fast_note += f"\n快照距今约 {age} 秒；刷新页会覆盖对应药材的最新价格和购买指令。"
+                    if cached.get("stale"):
+                        fast_note += "\n历史价格仅用于定位候选页；实际购买前仍按固定页码重新查看并校验价格。"
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             old = self.jobs.get(key)
@@ -563,7 +574,7 @@ class AutoAlchemyOptimizer:
         await self._send_page(job, send_cb)
         return (
             "✅ 已启动炼丹流程\n"
-            "📊 正在遍历坊市1-8页采集药材价格；采集完成后将读取背包药材进行背包抵扣。"
+            f"📊 正在刷新坊市药材页：{','.join(map(str, scan_pages))}；采集完成后将读取背包药材进行背包抵扣。"
             f"{dyn_note}"
             f"{fast_note}"
         )
@@ -640,8 +651,24 @@ class AutoAlchemyOptimizer:
             if not self.target_unknown_price_execute:
                 return "❌ 指定丹药不在固定炼金售价表中，且 target_unknown_price_execute=false。当前支持固定利润计算的丹药：" + "、".join(FIXED_PILL_SALE_PRICE.keys())
             unknown_price_note = f"\n⚠️ {pill} 未配置固定炼金售价，本次将按药材总成本最低的可用丹方执行，不做6丹利润阈值判断。"
-        pages = self._target_scan_pages(pill)
-        page_note = "按页码索引只刷新相关页" if pages and len(pages) < self.max_page else "页码索引不完整，先遍历坊市1-8页"
+        cached = self._read_snapshot(allow_stale=True)
+        initial_prices = dict(cached.get("prices") or {}) if cached else {}
+        initial_buy_commands = dict(cached.get("buy_commands") or {}) if cached else {}
+        initial_pages = {
+            **(dict(cached.get("pages_by_name") or {}) if cached else {}),
+            **self._read_page_index(),
+        }
+        pages = self._target_pages_from_cached_snapshot(
+            pill,
+            initial_prices,
+            initial_buy_commands,
+            initial_pages,
+        )
+        if pages:
+            page_note = f"根据固定药材页码和历史价格，只刷新候选丹方页：{','.join(map(str, pages))}"
+        else:
+            pages = self._target_scan_pages(pill)
+            page_note = "按固定药材页码刷新相关页" if pages and len(pages) < self.max_page else "页码或价格信息不足，先遍历坊市1-8页"
         if not pages:
             pages = list(range(1, self.max_page + 1))
         msg = await self._start_collect_job(
@@ -654,6 +681,14 @@ class AutoAlchemyOptimizer:
             scan_pages=pages,
             target_pill=pill,
             target_rounds=qty,
+            initial_prices=initial_prices,
+            initial_buy_commands=initial_buy_commands,
+            initial_pages_by_name=initial_pages,
+            fast_start_note=(
+                "\n⚡ 历史价格只用于定位候选丹方页，实际购买前会按固定页码重新查看。"
+                if cached and pages and len(pages) < self.max_page
+                else ""
+            ),
         )
         lock_note = (
             "指定模式使用方案锁；当前丹方仍达阈值时继续沿用"
@@ -2571,6 +2606,26 @@ class AutoAlchemyOptimizer:
             queue.sort(key=lambda x: (int(x.get("page") or 999), x.get("name", "")))
         return queue
 
+    async def _scan_remaining_market_pages(self, key: str, job: AutoAlchemyJob, send_cb, reason: str) -> bool:
+        seen = {int(page) for page in job.pages_seen if 1 <= int(page) <= self.max_page}
+        remaining = [page for page in range(1, self.max_page + 1) if page not in seen]
+        if not remaining or not self._job_can_continue(key, job):
+            return False
+        job.phase = "COLLECTING"
+        job.scan_pages = remaining
+        job.scan_index = 0
+        job.current_page = remaining[0]
+        job.retry_count = 0
+        job.updated_at = time.time()
+        await send_cb(
+            f"🔄 固定页码快速扫描未得到可执行丹方，继续补扫剩余页：{','.join(map(str, remaining))}。\n"
+            f"原因：{reason}"
+        )
+        if not self._job_can_continue(key, job):
+            return True
+        await self._send_page(job, send_cb)
+        return True
+
 
     async def _finish_collecting_and_start_batch_buy(self, key: str, job: AutoAlchemyJob, send_cb) -> None:
         """坊市扫描+背包采集完成后，进行丹方匹配并进入购买/炼丹阶段。"""
@@ -2593,6 +2648,8 @@ class AutoAlchemyOptimizer:
             job.batch_selected = selected
             job.batch_reserve_candidates = []
             if not selected:
+                if await self._scan_remaining_market_pages(key, job, send_cb, "当前候选页没有满足利润阈值的背包抵扣丹方"):
+                    return
                 self.jobs.pop(key, None)
                 self._write_snapshot(job.prices, "", job.buy_commands, job.pages_by_name)
                 await send_cb(
@@ -2627,6 +2684,8 @@ class AutoAlchemyOptimizer:
             job.batch_selected = selected
             job.batch_reserve_candidates = reserve
             if not selected:
+                if await self._scan_remaining_market_pages(key, job, send_cb, "当前候选页没有满足利润阈值的批量丹方"):
+                    return
                 self.jobs.pop(key, None)
                 report = self._format_no_profitable_report(job, len(candidates), len(job.prices), skipped_no_price + skipped_no_wildcard)
                 if dyn_note:
@@ -2646,6 +2705,8 @@ class AutoAlchemyOptimizer:
         allow_unknown = self.target_unknown_price_execute and job.target_pill not in FIXED_PILL_SALE_PRICE
         best = self._select_best_for_target(candidates, min_profit=job.min_profit, allow_unknown_sale=allow_unknown)
         if not best:
+            if await self._scan_remaining_market_pages(key, job, send_cb, f"{job.target_pill} 在候选页没有价格完整且满足条件的丹方"):
+                return
             self.jobs.pop(key, None)
             msg = (
                 f"❌ 指定丹药炼丹停止：{job.target_pill} 当前没有药材价格完整的可用丹方。\n"
@@ -3374,17 +3435,34 @@ class AutoAlchemyOptimizer:
         candidates.sort(key=lambda x: (x[1], x[0]))
         return candidates[0]
 
-    def _read_page_index(self) -> Dict[str, int]:
-        if not self.page_index_cache_enabled or not self.page_index_path or not os.path.exists(self.page_index_path):
+    def _read_page_index_file(self, path: str) -> Dict[str, int]:
+        if not path or not os.path.exists(path):
             return {}
         try:
-            with open(self.page_index_path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                return {self.normalize_name(k): int(v) for k, v in data.items() if str(v).isdigit() or isinstance(v, int)}
+                pages: Dict[str, int] = {}
+                for key, value in data.items():
+                    name = self.normalize_name(key)
+                    try:
+                        page = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if name and 1 <= page <= self.max_page:
+                        pages[name] = page
+                return pages
         except Exception:
             return {}
         return {}
+
+    def _read_page_index(self) -> Dict[str, int]:
+        if not self.page_index_cache_enabled:
+            return {}
+        # 固定目录提供完整基线；账号文件保存实扫校正并优先覆盖。
+        pages = self._read_page_index_file(self.page_index_catalog_path)
+        pages.update(self._read_page_index_file(self.page_index_path))
+        return pages
 
     def _write_page_index(self, pages: Dict[str, int]) -> None:
         if not self.page_index_cache_enabled or not self.page_index_path:
@@ -3512,7 +3590,7 @@ class AutoAlchemyOptimizer:
                     lines.append(f"其余 {len(detail_items) - 12} 种略。")
         return "\n".join(lines)
 
-    def _read_snapshot(self) -> Dict[str, Any]:
+    def _read_snapshot(self, *, allow_stale: bool = False) -> Dict[str, Any]:
         if not self.snapshot_path or not os.path.exists(self.snapshot_path):
             return {}
         try:
@@ -3521,9 +3599,12 @@ class AutoAlchemyOptimizer:
             if not isinstance(data, dict):
                 return {}
             updated_at = int(data.get("updated_at") or 0)
+            stale = False
             if self.batch_snapshot_max_age_sec > 0 and updated_at > 0:
                 if int(time.time()) - updated_at > self.batch_snapshot_max_age_sec:
-                    return {}
+                    stale = True
+                    if not allow_stale:
+                        return {}
             prices_raw = data.get("prices") or {}
             pages_raw = data.get("pages_by_name") or {}
             commands_raw = data.get("buy_commands") or {}
@@ -3554,7 +3635,13 @@ class AutoAlchemyOptimizer:
                     cmd = self._normalize_buy_command(str(v or ""))
                     if name and cmd:
                         commands[name] = cmd
-            return {"updated_at": updated_at, "prices": prices, "pages_by_name": pages, "buy_commands": commands}
+            return {
+                "updated_at": updated_at,
+                "stale": stale,
+                "prices": prices,
+                "pages_by_name": pages,
+                "buy_commands": commands,
+            }
         except Exception as e:
             self._warn(f"读取炼丹快照失败：{e}")
             return {}
@@ -3568,8 +3655,43 @@ class AutoAlchemyOptimizer:
             selected = self._select_profitable_all_candidates(candidates, min_profit=self.batch_mode_profit_threshold)
         else:
             selected = self._select_profitable_best_by_pill(candidates, yield_count=self.default_yield_count, min_profit=self.batch_mode_profit_threshold)
+        return self._pages_for_candidates(selected, pages_by_name)
+
+    def _target_pages_from_cached_snapshot(
+        self,
+        pill: str,
+        prices: Dict[str, float],
+        buy_commands: Dict[str, str],
+        pages_by_name: Dict[str, int],
+    ) -> List[int]:
+        if not prices or not pages_by_name:
+            return []
+        allow_unknown = self.target_unknown_price_execute and pill not in FIXED_PILL_SALE_PRICE
+        try:
+            candidates, _, _ = self._compute_candidates(
+                prices,
+                buy_commands,
+                pages_by_name,
+                yield_count=self.default_yield_count,
+                pill_filter=pill,
+                allow_unknown_sale=allow_unknown,
+            )
+        except Exception:
+            return []
+        best = self._select_best_for_target(
+            candidates,
+            min_profit=self.min_profit_6pill,
+            allow_unknown_sale=allow_unknown,
+        )
+        return self._pages_for_candidates([best] if best else [], pages_by_name)
+
+    def _pages_for_candidates(
+        self,
+        candidates: List[Dict[str, Any]],
+        pages_by_name: Dict[str, int],
+    ) -> List[int]:
         pages: set[int] = set()
-        for cand in selected:
+        for cand in candidates:
             for m in cand.get("materials", []):
                 try:
                     page = int(m.get("page") or pages_by_name.get(self.normalize_name(m.get("name", "")), 0) or 0)

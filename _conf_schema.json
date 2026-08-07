@@ -261,9 +261,9 @@
         "default": 130
       },
       "page_index_cache_enabled": {
-        "description": "药材页码索引缓存",
+        "description": "固定药材页码目录",
         "type": "bool",
-        "hint": "页码稳定时可减少每次全量查 1-8 页。",
+        "hint": "使用内置固定页码目录定位药材，实扫结果会按账号校正；目录失效且无候选时会补扫剩余页。",
         "default": true
       },
       "batch_mode_plan_lock": {

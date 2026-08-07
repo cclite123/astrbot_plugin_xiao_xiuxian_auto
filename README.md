@@ -57,7 +57,7 @@ xiaoxiuxian/
 ├── time_utils.py               # 时间工具：北京时间格式化
 ├── data/
 │   ├── alchemy_recipes.txt     # 丹方数据
-│   ├── alchemy_page_index.json # 药材页码索引缓存
+│   ├── alchemy_page_index.json # 固定药材页码目录
 │   └── herb_max_prices.yaml    # 药材最高收购价配置
 ├── market_price_server/
 │   ├── server.py               # 坊市价格中心 FastAPI 服务（可独立部署）
@@ -245,6 +245,8 @@ xiaoxiuxian/
 | `指定丹药 摄魂鬼丸 3` | 指定丹药炼制 3 炉 |
 | `开启背包炼丹` | 使用背包已有药材炼丹 |
 | `关闭炼丹` | 终止并清空当前炼丹流程 |
+
+坊市各页的药材种类基本固定，炼丹模块会使用 `data/alchemy_page_index.json` 直接定位候选丹方所需页面。多账号启动时会以该文件作为完整基线，并把实际扫描结果写入各账号目录进行校正；历史价格仅用于选择需要刷新的页面，购买前仍会刷新对应页并重新校验价格。若固定页码或历史候选已经失效且未得到可执行丹方，流程会自动补扫本轮尚未查看的剩余页面后重新计算。
 
 ### 管理指令
 

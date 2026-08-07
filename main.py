@@ -650,11 +650,13 @@ class XiaoXiuxianAuto(Star):
         )
 
         auto_alchemy_cfg = dict(self.cfg.get("auto_alchemy", {}) or {})
+        alchemy_page_catalog_path = os.path.join(self.data_dir, "alchemy_page_index.json")
         self.auto_alchemy = AutoAlchemyOptimizer(
             official_qq=official_qq,
             recipe_path=os.path.join(self.data_dir, "alchemy_recipes.txt"),
             snapshot_path=os.path.join(self.data_dir, "auto_alchemy_snapshot.json"),
-            page_index_path=os.path.join(self.data_dir, "alchemy_page_index.json"),
+            page_index_path=alchemy_page_catalog_path,
+            page_index_catalog_path=alchemy_page_catalog_path,
             config=auto_alchemy_cfg,
             logger=logger,
         )
@@ -804,6 +806,11 @@ class XiaoXiuxianAuto(Star):
 
         herb_prices_path = os.path.join(account_dir, "herb_max_prices.yaml")
         self._seed_account_file(os.path.join(self.data_dir, "herb_max_prices.yaml"), herb_prices_path)
+        alchemy_page_index_path = os.path.join(account_dir, "alchemy_page_index.json")
+        self._seed_account_file(
+            os.path.join(self.data_dir, "alchemy_page_index.json"),
+            alchemy_page_index_path,
+        )
         auto_cfg = dict(cfg.get("auto_alchemy", {}) or {})
         auto_cfg["herb_max_prices_path"] = herb_prices_path
         auto_cfg["herb_grade_catalog_path"] = os.path.join(self.data_dir, "herb_max_prices.yaml")
@@ -811,7 +818,8 @@ class XiaoXiuxianAuto(Star):
             official_qq=official_qq,
             recipe_path=os.path.join(self.data_dir, "alchemy_recipes.txt"),
             snapshot_path=os.path.join(account_dir, "auto_alchemy_snapshot.json"),
-            page_index_path=os.path.join(account_dir, "alchemy_page_index.json"),
+            page_index_path=alchemy_page_index_path,
+            page_index_catalog_path=os.path.join(self.data_dir, "alchemy_page_index.json"),
             config=auto_cfg,
             logger=logger,
         )

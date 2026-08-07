@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -466,6 +467,119 @@ class AlchemyRegressionTests(unittest.IsolatedAsyncioTestCase):
         pages = controller._batch_pages_from_cached_snapshot({}, {}, {"七星草": 3})
 
         self.assertEqual([3], pages)
+
+    def test_stale_snapshot_is_available_only_for_page_planning(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_path = Path(temp_dir) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "updated_at": int(time.time()) - 60,
+                        "prices": {"七星草": 10},
+                        "pages_by_name": {"七星草": 1},
+                        "buy_commands": {"七星草": "坊市购买abc 1"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            controller = AutoAlchemyOptimizer(
+                official_qq="3889001741",
+                recipe_path="",
+                snapshot_path=str(snapshot_path),
+                config={"batch_snapshot_max_age_sec": 1},
+            )
+
+            self.assertEqual({}, controller._read_snapshot())
+            planning_snapshot = controller._read_snapshot(allow_stale=True)
+
+            self.assertTrue(planning_snapshot["stale"])
+            self.assertEqual(1, planning_snapshot["pages_by_name"]["七星草"])
+
+    def test_target_snapshot_refreshes_only_best_formula_pages(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"min_profit_6pill": 50},
+        )
+        best = make_candidate(100.0, "摄魂鬼丸")
+        best["materials"] = [
+            {"name": "甲药", "page": 2},
+            {"name": "乙药", "page": 5},
+        ]
+        other = make_candidate(80.0, "摄魂鬼丸")
+        other["materials"] = [{"name": "丙药", "page": 7}]
+        controller._compute_candidates = lambda *args, **kwargs: ([other, best], 0, 0)
+
+        pages = controller._target_pages_from_cached_snapshot(
+            "摄魂鬼丸",
+            {"甲药": 1},
+            {},
+            {"甲药": 2, "乙药": 5, "丙药": 7},
+        )
+
+        self.assertEqual([2, 5], pages)
+
+    def test_herb_alias_matches_fixed_market_page_catalog(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={},
+        )
+
+        self.assertEqual("苦曼藤", controller.normalize_name("苦蔓藤"))
+        self.assertIn("苦曼藤", controller.herb_props)
+
+    def test_account_page_corrections_override_and_complete_fixed_catalog(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            catalog_path = Path(temp_dir) / "catalog.json"
+            account_path = Path(temp_dir) / "account.json"
+            catalog_path.write_text(
+                json.dumps({"七星草": 1, "三叶青芝": 1}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            account_path.write_text(
+                json.dumps({"七星草": 2}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            controller = AutoAlchemyOptimizer(
+                official_qq="3889001741",
+                recipe_path="",
+                page_index_path=str(account_path),
+                page_index_catalog_path=str(catalog_path),
+                config={},
+            )
+
+            self.assertEqual(
+                {"七星草": 2, "三叶青芝": 1},
+                controller._read_page_index(),
+            )
+
+    async def test_partial_page_scan_falls_back_to_unseen_pages(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"send_interval_sec": 0},
+        )
+        key = "10001:20002"
+        job = AutoAlchemyJob(
+            phase="COLLECTING",
+            pages_seen=[2, 5],
+        )
+        controller.jobs[key] = job
+        send = SendRecorder()
+
+        continued = await controller._scan_remaining_market_pages(
+            key,
+            job,
+            send,
+            "测试候选页失效",
+        )
+
+        self.assertTrue(continued)
+        self.assertEqual([1, 3, 4, 6, 7, 8], job.scan_pages)
+        self.assertTrue(any("补扫剩余页" in message for message in send.messages))
+        self.assertEqual("@3889001741 坊市查看药材1", send.messages[-1])
 
     def test_price_reselection_never_exceeds_command_count(self):
         controller = AutoAlchemyOptimizer(
