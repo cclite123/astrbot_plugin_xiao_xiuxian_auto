@@ -183,7 +183,7 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
             "关闭宗门闭关",
             "开启炼丹",
             "开启背包炼丹",
-            "炼丹 .+",
+            "指定丹药 .+",
             "关闭炼丹",
             "炼丹状态",
             "开启购买药材(?:\\s+\\d+)?",
@@ -202,6 +202,7 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("开启无尽真元检测", command_regex)
         self.assertNotIn("关闭无尽真元检测", command_regex)
         self.assertNotIn("设置无尽真元检测.*", command_regex)
+        self.assertNotIn("炼丹 .+", command_regex)
         self.assertLess(command_regex.index("开启真元检测"), command_regex.index("开启无尽"))
 
         for path in (

@@ -629,7 +629,7 @@ class AutoAlchemyOptimizer:
             return "🛑 炼丹模块已关闭。"
         pill, qty = self._parse_target_args(args)
         if not pill or qty <= 0:
-            return "❌ 用法：炼丹 丹药名称 数量\n示例：炼丹 化煞魔丸 3\n说明：数量代表炼制炉数。"
+            return "❌ 用法：指定丹药 丹药名称 数量\n示例：指定丹药 化煞魔丸 3\n说明：数量代表炼制炉数。"
         if not self.recipe_path or not os.path.exists(self.recipe_path):
             return f"❌ 未找到丹方文件：{self.recipe_path}\n请把配方查询.txt 放到 data/alchemy_recipes.txt。"
         recipes_for_pill = [r for r in self._load_recipes() if r.pill == pill]

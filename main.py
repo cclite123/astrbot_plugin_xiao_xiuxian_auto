@@ -1746,7 +1746,7 @@ class XiaoXiuxianAuto(Star):
                     f"🔹 [宗门]：{'✅开启' if sect_st.enabled else '🛑关闭'} ({sect_st.daily_hour:02d}:{sect_st.daily_minute:02d}) | {self._next_text(sect_st.enabled, sect_st.phase, action_ts=sect_st.next_action_ts, wake_ts=sect_st.wake_at_ts)}\n"
                     f"🔹 [日常]：签到{'✅' if routine_st.signin_enabled else '🛑'}({fmt_ts_compact(routine_st.sign_action_ts or routine_st.sign_wake_ts)}) 领丹{'✅' if routine_st.pill_enabled else '🛑'}({fmt_ts_compact(routine_st.pill_action_ts or routine_st.pill_wake_ts)}) 挖矿{'✅' if routine_st.mine_enabled else '🛑'}({fmt_ts_compact(routine_st.mine_action_ts or routine_st.mine_wake_ts)}) 灵田{'✅' if routine_st.farm_enabled else '🛑'}({fmt_ts_compact(routine_st.farm_action_ts or routine_st.farm_wake_ts)})\n"
                     f"🔹 [物品]：一键上架 / 一键炼金\n"
-                    f"🔹 [炼丹]：开启炼丹 / 开启背包炼丹 / 开启购买药材 / 开启动态购买 / 炼丹 丹药 数量 / 关闭炼丹\n"
+                    f"🔹 [炼丹]：开启炼丹 / 开启背包炼丹 / 开启购买药材 / 开启动态购买 / 指定丹药 丹药 数量 / 关闭炼丹\n"
                     f"🔹 [灵界]：{'✅开启' if linjie_st.enabled else '🛑关闭'} | {linjie.summary_line(linjie_st)}\n"
                     f"🔹 [无尽]：{'✅开启' if endless_st.enabled else '🛑关闭'} | 进度:{endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'} 真元检测:{'✅' if endless_st.check_mp_enabled else '🛑'}({endless_st.mp_threshold}%)\n"
                     f"🔹 [坊市]：刷新坊市价格 / 更新坊市价格\n"
@@ -1834,7 +1834,7 @@ class XiaoXiuxianAuto(Star):
             return ("📜 【炼丹利润模块】指令说明 📜\n"
                     "▶ 开启炼丹\n"
                     "▶ 开启背包炼丹\n"
-                    "▶ 炼丹 丹药名称 数量\n"
+                    "▶ 指定丹药 丹药名称 数量\n"
                     "▶ 关闭炼丹\n"
                     "▶ 炼丹状态\n"
                     "\n"
@@ -2836,7 +2836,7 @@ class XiaoXiuxianAuto(Star):
             elif text == "统计": reply = await self.bounty.cmd_stats(key)
             elif text == "开启炼丹": reply = await self.auto_alchemy.cmd_start(key, send_cb)
             elif text == "开启背包炼丹": reply = await self.auto_alchemy.cmd_backpack(key, send_cb)
-            elif text.startswith("炼丹 "): reply = await self.auto_alchemy.cmd_target(key, text.replace("炼丹", "", 1).strip(), send_cb)
+            elif text.startswith("指定丹药 "): reply = await self.auto_alchemy.cmd_target(key, text.replace("指定丹药", "", 1).strip(), send_cb)
             elif text == "关闭炼丹": reply = await self.auto_alchemy.cmd_stop(key)
             elif text == "炼丹状态": reply = await self.auto_alchemy.cmd_status(key)
             elif text == "开启购买药材": reply = await self.auto_alchemy.cmd_auto_buy_herbs_start(key, 1, send_cb)
@@ -2982,7 +2982,7 @@ class XiaoXiuxianAuto(Star):
         gid = getattr(event.message_obj, "group_id", None)
         return f"{sid}:{gid}" if gid else f"{sid}:private:{event.get_sender_id()}"
 
-    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启悬赏|关闭悬赏|悬赏(修为|价值|耗时)|统计|开启秘境|关闭秘境|开启签到|关闭签到|开启领丹|关闭领丹|开启挖矿|关闭挖矿|开启灵田|关闭灵田|开启宗门任务|关闭宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启修炼|关闭修炼|开启闭关|关闭闭关|开启宗门闭关|关闭宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启炼丹|开启背包炼丹|炼丹 .+|关闭炼丹|炼丹状态|开启购买药材(?:\s+\d+)?|关闭购买药材|开启动态购买|关闭动态购买|开启灵界升级|关闭灵界升级|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|灵界规划序列|开启真元检测|关闭真元检测|设置真元检测.*|开启无尽(?:\s+\d+)?|关闭无尽|无尽状态|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|继续任务|验证码状态|任务状态|修仙状态|修仙菜单.*)$")
+    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启悬赏|关闭悬赏|悬赏(修为|价值|耗时)|统计|开启秘境|关闭秘境|开启签到|关闭签到|开启领丹|关闭领丹|开启挖矿|关闭挖矿|开启灵田|关闭灵田|开启宗门任务|关闭宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启修炼|关闭修炼|开启闭关|关闭闭关|开启宗门闭关|关闭宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启炼丹|开启背包炼丹|指定丹药 .+|关闭炼丹|炼丹状态|开启购买药材(?:\s+\d+)?|关闭购买药材|开启动态购买|关闭动态购买|开启灵界升级|关闭灵界升级|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|灵界规划序列|开启真元检测|关闭真元检测|设置真元检测.*|开启无尽(?:\s+\d+)?|关闭无尽|无尽状态|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|继续任务|验证码状态|任务状态|修仙状态|修仙菜单.*)$")
     async def on_self_command(self, event: AstrMessageEvent):
 
 
@@ -3062,7 +3062,7 @@ class XiaoXiuxianAuto(Star):
         elif text == "统计": reply = await self.bounty.cmd_stats(key)
         elif text == "开启炼丹": reply = await self.auto_alchemy.cmd_start(key, send_cb)
         elif text == "开启背包炼丹": reply = await self.auto_alchemy.cmd_backpack(key, send_cb)
-        elif text.startswith("炼丹 "): reply = await self.auto_alchemy.cmd_target(key, text.replace("炼丹", "", 1).strip(), send_cb)
+        elif text.startswith("指定丹药 "): reply = await self.auto_alchemy.cmd_target(key, text.replace("指定丹药", "", 1).strip(), send_cb)
         elif text == "关闭炼丹": reply = await self.auto_alchemy.cmd_stop(key)
         elif text == "炼丹状态": reply = await self.auto_alchemy.cmd_status(key)
         elif text == "开启购买药材": reply = await self.auto_alchemy.cmd_auto_buy_herbs_start(key, 1, send_cb)
