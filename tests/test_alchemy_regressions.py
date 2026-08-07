@@ -238,6 +238,202 @@ class AlchemyRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, job.batch_buy_index)
         self.assertEqual(0, job.batch_success_count)
 
+    async def test_purchase_wait_does_not_timeout_and_advance_to_next_herb(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"retry_failed_after_batch": False},
+        )
+        key = "10001:20002"
+        first = {"name": "甲药", "buy_command": "坊市购买a 1"}
+        second = {"name": "乙药", "buy_command": "坊市购买b 1"}
+        job = AutoAlchemyJob(
+            phase="BATCH_BUY_WAIT",
+            last_command_ts=time.time() - 60,
+            batch_buy_queue=[first, second],
+            batch_buy_index=0,
+            batch_current_item=first,
+        )
+        controller.jobs[key] = job
+        send = SendRecorder()
+
+        await controller.tick(key, send)
+
+        self.assertEqual(0, job.batch_buy_index)
+        self.assertEqual("甲药", job.batch_current_item.get("name"))
+        self.assertEqual([], send.messages)
+
+    async def test_insufficient_material_reply_stops_without_internal_pause(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={},
+        )
+        key = "10001:20002"
+        job = AutoAlchemyJob(
+            phase="ALCHEMY_WAIT",
+            alchemy_queue=[
+                {"pill": "甲丹", "command": "配方甲", "profit": 10},
+                {"pill": "乙丹", "command": "配方乙", "profit": 10},
+            ],
+            alchemy_index=0,
+        )
+        controller.jobs[key] = job
+        send = SendRecorder()
+
+        handled = await controller.on_official_text(
+            key,
+            "请检查药材是否还在背包中，或者数量是否足够",
+            send,
+        )
+
+        self.assertTrue(handled)
+        self.assertNotIn(key, controller.jobs)
+        self.assertFalse(any("@3889001741 配方乙" in message for message in send.messages))
+        self.assertTrue(any("材料不足" in message for message in send.messages))
+
+    async def test_alchemy_confirmation_wait_never_auto_pauses(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={},
+        )
+        key = "10001:20002"
+        job = AutoAlchemyJob(
+            phase="ALCHEMY_WAIT",
+            last_command_ts=time.time() - 60,
+            alchemy_queue=[{"pill": "甲丹", "command": "配方甲", "profit": 10}],
+        )
+        controller.jobs[key] = job
+        send = SendRecorder()
+
+        await controller.tick(key, send)
+
+        self.assertEqual("ALCHEMY_WAIT", job.phase)
+        self.assertEqual([], send.messages)
+
+    async def test_batch_alchemy_refreshes_backpack_before_sending_formula(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={},
+        )
+        controller.inventory_parser = object()
+        key = "10001:20002"
+        job = AutoAlchemyJob(
+            mode="batch",
+            phase="BUYING",
+            backpack_counts={"甲药": 2},
+        )
+        controller.jobs[key] = job
+        send = SendRecorder()
+
+        await controller._start_alchemy_sequence(key, job, send)
+
+        self.assertEqual("ALCHEMY_BAG_VERIFYING", job.phase)
+        self.assertEqual({"甲药": 2}, job.planning_backpack_counts)
+        self.assertEqual({}, job.backpack_counts)
+        self.assertTrue(any("药材背包" in message for message in send.messages))
+        self.assertFalse(any("@3889001741 配方" in message for message in send.messages))
+
+    def test_captcha_resume_resets_alchemy_wait_timer(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={},
+        )
+        key = "10001:20002"
+        job = AutoAlchemyJob(
+            phase="BAG_COLLECTING",
+            last_command_ts=time.time() - 60,
+        )
+        controller.jobs[key] = job
+
+        controller.on_captcha_resumed(key)
+
+        self.assertGreater(job.last_command_ts, time.time() - 1)
+
+    def test_alchemy_queue_rejects_formula_when_one_material_is_missing(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={},
+        )
+        recipe = make_inventory_recipe(
+            "missing-one",
+            [("主药", "甲药", 1), ("药引", "乙药", 1), ("辅药", "丙药", 1)],
+        )
+        candidate = make_candidate(10.0)
+        candidate["recipe"] = recipe
+        candidate["materials"] = [
+            {"role": "主药", "name": "甲药", "qty": 1},
+            {"role": "药引", "name": "乙药", "qty": 1},
+            {"role": "辅药", "name": "丙药", "qty": 1},
+        ]
+        job = AutoAlchemyJob(
+            batch_selected=[candidate],
+            backpack_counts={"甲药": 1, "乙药": 1},
+        )
+
+        queue = controller._build_alchemy_queue_from_purchased(job)
+
+        self.assertEqual([], queue)
+        self.assertTrue(any("丙药×1" in item for item in job.skipped_alchemy))
+
+    def test_verified_backpack_is_hard_limit_even_when_purchase_count_says_complete(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={},
+        )
+        recipe = make_inventory_recipe(
+            "verified-missing-one",
+            [("主药", "甲药", 1), ("药引", "乙药", 1), ("辅药", "丙药", 1)],
+        )
+        candidate = make_candidate(10.0)
+        candidate["recipe"] = recipe
+        candidate["materials"] = [
+            {"role": "主药", "name": "甲药", "qty": 1},
+            {"role": "药引", "name": "乙药", "qty": 1},
+            {"role": "辅药", "name": "丙药", "qty": 1},
+        ]
+        job = AutoAlchemyJob(
+            batch_selected=[candidate],
+            purchased_counts={"甲药": 1, "乙药": 1, "丙药": 1},
+            backpack_counts={"甲药": 1, "乙药": 1},
+            inventory_verified_after_buy=True,
+        )
+
+        queue = controller._build_alchemy_queue_from_purchased(job)
+
+        self.assertEqual([], queue)
+        self.assertTrue(any("丙药×1" in item for item in job.skipped_alchemy))
+
+    def test_alchemy_queue_rejects_formula_with_missing_material_role(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={},
+        )
+        candidate = make_candidate(10.0)
+        candidate["recipe"] = make_inventory_recipe(
+            "missing-guide-role",
+            [("主药", "甲药", 1), ("药引", "乙药", 1), ("辅药", "丙药", 1)],
+        )
+        candidate["materials"] = [
+            {"role": "主药", "name": "甲药", "qty": 1},
+            {"role": "辅药", "name": "丙药", "qty": 1},
+        ]
+        job = AutoAlchemyJob(
+            batch_selected=[candidate],
+            backpack_counts={"甲药": 1, "乙药": 1, "丙药": 1},
+        )
+
+        queue = controller._build_alchemy_queue_from_purchased(job)
+
+        self.assertEqual([], queue)
+        self.assertTrue(any("材料角色不完整" in item for item in job.skipped_alchemy))
+
     def test_price_reuse_requires_mode_profit_threshold_and_plan_lock(self):
         locked = AutoAlchemyOptimizer(
             official_qq="3889001741",
@@ -359,6 +555,8 @@ class AlchemyRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("merge_buy_queue", auto_schema)
         self.assertNotIn("batch_buy_result_timeout_sec", auto_schema)
         self.assertNotIn("captcha_wait_sec", auto_schema)
+        self.assertNotIn("purchase_response_timeout_sec", auto_schema)
+        self.assertNotIn("alchemy_confirm_timeout_sec", auto_schema)
 
 
 if __name__ == "__main__":

@@ -192,7 +192,7 @@
   "auto_alchemy": {
     "description": "炼丹模块配置",
     "type": "object",
-    "hint": "支持批量炼丹、指定丹药炼丹、背包炼丹、暂停/继续/关闭、多轮购买等。",
+    "hint": "支持批量炼丹、指定丹药炼丹、背包炼丹、关闭流程、多轮购买等。",
     "items": {
       "enabled": {
         "description": "炼丹总开关",
@@ -243,23 +243,11 @@
         "type": "int",
         "default": 30
       },
-      "purchase_response_timeout_sec": {
-        "description": "购买回执超时（秒）",
-        "type": "float",
-        "hint": "30 秒无有效回执则结束验证码空窗期，跳过当前购买并继续后续流程。",
-        "default": 30.0
-      },
       "busy_retry_delay_sec": {
         "description": "繁忙重试延迟（秒）",
         "type": "float",
         "hint": "官方回执包含「太繁忙」时不判定购买失败，等待该秒数后重试。",
         "default": 15.0
-      },
-      "alchemy_confirm_timeout_sec": {
-        "description": "炼丹确认超时（秒）",
-        "type": "float",
-        "hint": "炼丹指令发出后等待「恭喜道友成功炼成丹药」的超时时间。",
-        "default": 20.0
       },
       "alchemy_send_interval_sec": {
         "description": "炼丹指令间隔（秒）",

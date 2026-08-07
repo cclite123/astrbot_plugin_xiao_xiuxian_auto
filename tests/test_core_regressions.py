@@ -61,6 +61,15 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(main_text.count("阶段：{pause.phase"), 2)
         self.assertGreaterEqual(main_text.count("消息序号：{pause.msg_seq"), 2)
 
+    def test_captcha_guard_blocks_ticks_and_resets_alchemy_timer_on_resume(self):
+        main_text = (ROOT / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "if self._captcha_for_key(bound_key).is_paused(bound_key):",
+            main_text,
+        )
+        self.assertGreaterEqual(main_text.count("on_captcha_resumed(key)"), 3)
+
     def test_special_bounty_items_are_individual_priorities(self):
         options = [
             BountyOption(1, "普通任务", 100, 1, 100, "普通奖励"),
@@ -175,8 +184,6 @@ class CoreRegressionTests(unittest.IsolatedAsyncioTestCase):
             "开启炼丹",
             "开启背包炼丹",
             "炼丹 .+",
-            "暂停炼丹",
-            "继续炼丹",
             "关闭炼丹",
             "炼丹状态",
             "开启购买药材(?:\\s+\\d+)?",
