@@ -236,15 +236,18 @@ class AutoAlchemyOptimizer:
         self.target_mode_plan_lock = bool(cfg.get("target_mode_plan_lock", False))
         self.batch_mode_plan_lock = bool(cfg.get("batch_mode_plan_lock", True))
         self.batch_repeat_until_threshold = bool(cfg.get("batch_repeat_until_threshold", True))
-        self.max_batch_formula_count = max(0, int(cfg.get("max_batch_formula_count", cfg.get("max_batch_pill_count", 6))))
-        self.max_formula_per_pill = max(1, int(cfg.get("max_formula_per_pill", 6)))
+        legacy_formula_count = max(1, int(cfg.get("max_batch_formula_count", cfg.get("max_batch_pill_count", 6))))
+        legacy_repeat_count = max(1, int(cfg.get("max_formula_per_pill", 6)))
+        self.batch_alchemy_command_count = max(
+            1,
+            int(cfg.get("batch_alchemy_command_count", legacy_formula_count * legacy_repeat_count)),
+        )
         self.batch_fast_start_from_snapshot = bool(cfg.get("batch_fast_start_from_snapshot", True))
         self.batch_snapshot_max_age_sec = max(0, int(cfg.get("batch_snapshot_max_age_sec", 21600)))
         self.batch_refresh_selected_pages = bool(cfg.get("batch_refresh_selected_pages", True))
         self.retry_failed_after_batch = bool(cfg.get("retry_failed_after_batch", True))
         self.multi_round_buy_enabled = bool(cfg.get("multi_round_buy_enabled", True))
         self.refresh_pages_each_buy_round = bool(cfg.get("refresh_pages_each_buy_round", True))
-        self.backpack_max_formula_count = max(1, int(cfg.get("backpack_max_formula_count", 6)))
         self.backpack_use_existing_as_free = bool(cfg.get("backpack_use_existing_as_free", True))
         self.backpack_min_profit_6pill = float(cfg.get("backpack_min_profit_6pill", 0))
         self.backpack_require_existing_material = bool(cfg.get("backpack_require_existing_material", True))
@@ -541,7 +544,7 @@ class AutoAlchemyOptimizer:
                 mode="batch",
                 max_page=self.max_page,
                 yield_count=self.default_yield_count,
-                min_profit=self.min_profit_6pill,
+                min_profit=self.batch_mode_profit_threshold,
                 scan_pages=scan_pages,
                 scan_index=0,
                 current_page=scan_pages[0] if scan_pages else 1,
@@ -569,7 +572,7 @@ class AutoAlchemyOptimizer:
         )
 
     async def cmd_backpack(self, key: str, send_cb) -> str:
-        """根据药材背包已有药材匹配最优丹方，只使用背包药材，不做坊市购买，盈利>10万即可炼制。"""
+        """根据药材背包匹配材料完整且利润达标的丹方，不做坊市购买。"""
         if not self.enabled:
             return "🛑 炼丹模块已关闭。"
         if not self.recipe_path or not os.path.exists(self.recipe_path):
@@ -655,7 +658,12 @@ class AutoAlchemyOptimizer:
             target_pill=pill,
             target_rounds=qty,
         )
-        return msg + f"\n指定模式不使用方案锁；价格变化时只在 {pill} 内重新选方。\n{page_note}。"
+        lock_note = (
+            "指定模式使用方案锁；当前丹方仍达阈值时继续沿用"
+            if self.target_mode_plan_lock
+            else f"指定模式不使用方案锁；价格变化时只在 {pill} 内重新选方"
+        )
+        return msg + f"\n{lock_note}。\n{page_note}。"
 
     def _parse_target_args(self, args: str) -> Tuple[str, int]:
         raw = self.ZERO_WIDTH_RE.sub("", str(args or "")).strip()
@@ -733,6 +741,9 @@ class AutoAlchemyOptimizer:
             return "炼丹流程：当前没有运行中的流程。"
         return "🛑 炼丹流程已关闭，本轮购买队列、炼丹队列和等待状态已清空。"
 
+    def _job_can_continue(self, key: str, job: AutoAlchemyJob) -> bool:
+        return self.jobs.get(key) is job and job.phase not in {"PAUSED", "STOPPED", "DONE"}
+
     async def cmd_auto_buy_herbs_start(self, key: str, rounds: int, send_cb) -> str:
         """开启购买药材流程。"""
         if not self.enabled:
@@ -783,6 +794,8 @@ class AutoAlchemyOptimizer:
 
     async def _send_next_herb_buy_purchase(self, key: str, job: AutoAlchemyJob, send_cb) -> None:
         """发送下一个药材购买指令。"""
+        if not self._job_can_continue(key, job):
+            return
         while job.herb_buy_buy_index < len(job.herb_buy_buy_queue):
             item = dict(job.herb_buy_buy_queue[job.herb_buy_buy_index] or {})
             name = self.normalize_name(item.get("name", ""))
@@ -799,6 +812,8 @@ class AutoAlchemyOptimizer:
 
     async def _finish_herb_buy_page(self, key: str, job: AutoAlchemyJob, send_cb) -> None:
         """当前页购买完成，进入下一页或下一轮。"""
+        if not self._job_can_continue(key, job):
+            return
         job.phase = "HERB_BUY_SCANNING"
         job.herb_buy_buy_queue = []
         job.herb_buy_buy_index = 0
@@ -809,6 +824,8 @@ class AutoAlchemyOptimizer:
             job.retry_count = 0
             if self.send_interval_sec > 0:
                 await asyncio.sleep(self.send_interval_sec)
+            if not self._job_can_continue(key, job):
+                return
             await self._send_herb_buy_page(job, send_cb)
             return
         if job.herb_buy_current_round < job.herb_buy_rounds:
@@ -822,6 +839,8 @@ class AutoAlchemyOptimizer:
             )
             if self.send_interval_sec > 0:
                 await asyncio.sleep(self.send_interval_sec)
+            if not self._job_can_continue(key, job):
+                return
             await self._send_herb_buy_page(job, send_cb)
             return
         self.jobs.pop(key, None)
@@ -897,6 +916,8 @@ class AutoAlchemyOptimizer:
             job.updated_at = time.time()
             if self.send_interval_sec > 0:
                 await asyncio.sleep(self.send_interval_sec)
+            if not self._job_can_continue(key, job):
+                return True
             await self._send_next_herb_buy_purchase(key, job, send_cb)
             return True
         if self._is_purchase_recheck_fail(clean_text):
@@ -910,9 +931,11 @@ class AutoAlchemyOptimizer:
             await send_cb(f"⚠️ 购买失败：{name or '未知药材'}，已跳过。")
             if self.send_interval_sec > 0:
                 await asyncio.sleep(self.send_interval_sec)
+            if not self._job_can_continue(key, job):
+                return True
             await self._send_next_herb_buy_purchase(key, job, send_cb)
             return True
-        return True
+        return False
 
 
 
@@ -990,12 +1013,18 @@ class AutoAlchemyOptimizer:
         if not job:
             return (
                 "炼丹流程：当前没有运行中的流程。\n"
-                f"当前批量配置：最多 {self.max_batch_formula_count} 条主丹方 × 每条 {self.max_formula_per_pill} 炉\n"
+                f"当前批量配置：计划执行 {self.batch_alchemy_command_count} 次炼丹指令\n"
                 f"利润阈值：{self.batch_mode_profit_threshold}万 | 背包抵扣：{'是' if self.use_backpack_for_batch_mode else '否'}\n"
                 f"动态购买：{'已开启' if self.dynamic_herb_buy_during_scan else '已关闭'}"
             )
         if job.phase in {"COLLECTING", "COLLECTING_DYN_BUY_WAIT"}:
             mode_label = "指定丹药" if job.report_mode == "target_buy" else "批量炼丹"
+            count_text = (
+                f"指定炼制：{job.target_pill} × {job.target_rounds} 次"
+                if job.mode == "target"
+                else f"批量配置：计划执行 {self.batch_alchemy_command_count} 次炼丹指令"
+            )
+            threshold = float(job.min_profit or 0) if job.mode == "target" else self.batch_mode_profit_threshold
             dyn_info = ""
             if self.dynamic_herb_buy_during_scan:
                 dyn_info = f"\n动态购买：已开启（成功 {job.dynamic_buy_success} / 失败 {job.dynamic_buy_fail}）"
@@ -1004,8 +1033,8 @@ class AutoAlchemyOptimizer:
                 dyn_info += f"\n动态购买中：{dyn_item}"
             return (
                 f"炼丹流程：{mode_label}采集中\n"
-                f"批量配置：最多 {self.max_batch_formula_count} 条主丹方 × 每条 {self.max_formula_per_pill} 炉\n"
-                f"利润阈值：{self.batch_mode_profit_threshold}万 | 背包抵扣：{'是' if self.use_backpack_for_batch_mode else '否'}\n"
+                f"{count_text}\n"
+                f"利润阈值：{self._fmt_num(threshold)}万 | 背包抵扣：{'是' if self.use_backpack_for_batch_mode else '否'}\n"
                 f"当前页：{job.current_page}\n"
                 f"待采集页：{'、'.join(map(str, job.scan_pages))}\n"
                 f"已采集药材价格：{len(job.prices)} 条\n"
@@ -1015,12 +1044,18 @@ class AutoAlchemyOptimizer:
         if job.phase in {"BATCH_BUY_WAIT", "BATCH_BUY_SENT", "BATCH_BUY_REFRESHING", "BUYING"}:
             item = job.batch_current_item or {}
             name = item.get("name") or "未知药材"
+            count_text = (
+                f"指定炼制：{job.target_pill} × {job.target_rounds} 次"
+                if job.mode == "target"
+                else f"批量配置：计划执行 {self.batch_alchemy_command_count} 次炼丹指令"
+            )
+            threshold = float(job.min_profit or 0) if job.mode == "target" else self.batch_mode_profit_threshold
             return (
                 "炼丹流程：逐个购买药材中\n"
                 f"模式：{'指定丹药 ' + job.target_pill if job.mode == 'target' else '批量模式'}\n"
-                f"批量配置：最多 {self.max_batch_formula_count} 条主丹方 × 每条 {self.max_formula_per_pill} 炉\n"
+                f"{count_text}\n"
                 f"默认成丹数：{job.yield_count}\n"
-                "筛选规则：不亏本即可购买炼制\n"
+                f"筛选规则：单次炼丹预计利润 >= {self._fmt_num(threshold)}万\n"
                 f"当前药材：{name}\n"
                 f"购买进度：{job.batch_success_count}/{job.batch_buy_expected}\n"
                 f"失败跳过：{sum(job.failed_counts.values())}"
@@ -1114,6 +1149,8 @@ class AutoAlchemyOptimizer:
             job.current_page += 1
             if self.send_interval_sec > 0:
                 await asyncio.sleep(self.send_interval_sec)
+            if not self._job_can_continue(key, job):
+                return True
             await self._send_backpack_page(job, send_cb)
             return True
         if not job.prices:
@@ -1137,6 +1174,8 @@ class AutoAlchemyOptimizer:
             else:
                 note = "当前没有可用坊市价格快照，正在拉取坊市药材1-8页；采购时会抵扣背包已有药材。"
             await send_cb(f"📦 药材背包读取完成：共识别 {len(job.backpack_counts)} 种药材。\n{note}")
+            if not self._job_can_continue(key, job):
+                return True
             await self._send_page(job, send_cb)
             return True
         if job.mode == "batch":
@@ -1154,12 +1193,15 @@ class AutoAlchemyOptimizer:
                 f"📦 药材背包读取完成：共识别 {len(job.backpack_counts)} 种药材。\n"
                 "正在刷新本轮预计用到的坊市页；采购时会抵扣背包已有药材。"
             )
+            if not self._job_can_continue(key, job):
+                return True
             await self._send_page(job, send_cb)
             return True
         await self._finish_backpack_collecting_and_start_buy(key, job, send_cb)
         return True
 
     async def _finish_backpack_collecting_and_start_buy(self, key: str, job: AutoAlchemyJob, send_cb) -> None:
+        threshold = max(0.0, float(self.backpack_min_profit_6pill))
         try:
             selected, candidate_count, skipped_count = self._select_backpack_best_candidates(job)
         except Exception as e:
@@ -1174,8 +1216,8 @@ class AutoAlchemyOptimizer:
                 f"背包药材种类：{len(job.backpack_counts)}\n"
                 f"可计算候选数：{candidate_count}\n"
                 f"跳过配方数：{skipped_count}\n"
-                f"筛选规则：只使用背包已有药材，成丹 {job.yield_count} 颗利润 > 10万，最多取 {self.backpack_max_formula_count} 个丹方。\n"
-                f"提示：无可匹配盈利丹方则停止。"
+                f"筛选规则：全部材料由背包提供，成丹 {job.yield_count} 颗利润 >= {self._fmt_num(threshold)}万。\n"
+                f"提示：持续选择并扣减库存，直到没有材料完整且不亏损的丹方。"
             )
             return
         await self._start_backpack_alchemy_directly(key, job, send_cb, candidate_count, skipped_count)
@@ -1200,22 +1242,22 @@ class AutoAlchemyOptimizer:
 
     def _select_backpack_best_candidates(self, job: AutoAlchemyJob) -> Tuple[List[Dict[str, Any]], int, int]:
         """
-        背包模式：优先用背包已有药材匹配丹方，盈利 > 10万即可。
+        背包模式：只用背包已有药材匹配丹方，利润达到配置阈值即可。
 
         规则：
-        - 背包已有药材只抵扣采购数量；利润成本仍按所有药材的实时坊市价格计算。
-        - 成丹 6 颗利润 > 10万即可纳入。
-        - 默认要求丹方至少使用 1 个背包已有药材，避免退化成普通坊市采购模式。
-        - 允许同一条丹方在背包材料仍可继续抵扣时被多次选择。
+        - 全部材料必须由背包提供，不会为背包炼丹购买缺口药材。
+        - 利润成本仍按所有药材的实时坊市价格计算，利润不低于配置阈值即可纳入。
+        - 同一条丹方可重复选择，直到库存无法再组成不亏损丹方。
         """
         recipes = [r for r in self._load_recipes() if r.pill in FIXED_PILL_SALE_PRICE]
         selected: List[Dict[str, Any]] = []
         available = {self.normalize_name(k): int(v or 0) for k, v in (job.backpack_counts or {}).items()}
         total_candidate_seen = 0
         skipped_total = 0
-        threshold = 10.0
+        threshold = max(0.0, float(self.backpack_min_profit_6pill))
+        selection_round_limit = sum(max(0, count) for count in available.values())
 
-        for _ in range(self.backpack_max_formula_count):
+        for _ in range(selection_round_limit):
             round_candidates: List[Tuple[Tuple[float, float, float, str], Dict[str, Any]]] = []
             round_skipped = 0
             for recipe in recipes:
@@ -1227,9 +1269,13 @@ class AutoAlchemyOptimizer:
                 backpack_used = sum(int(m.get("backpack_used") or 0) for m in materials)
                 if self.backpack_require_existing_material and backpack_used <= 0:
                     continue
+                purchase_cost = float(resolved.get("missing_cost", 0) or 0)
+                if purchase_cost > 0:
+                    round_skipped += 1
+                    continue
+                total_candidate_seen += 1
                 sale = float(FIXED_PILL_SALE_PRICE.get(recipe.pill, 0))
                 cost = float(resolved.get("recipe_cost", resolved.get("missing_cost", 0)) or 0)
-                purchase_cost = float(resolved.get("missing_cost", 0) or 0)
                 profit = sale * int(job.yield_count or self.default_yield_count) - cost
                 if profit < threshold:
                     continue
@@ -1248,14 +1294,57 @@ class AutoAlchemyOptimizer:
                     "purchase_cost": purchase_cost,
                 }
                 self._attach_command_efficiency(cand, use_purchase_qty=True)
-                sort_key = (float(backpack_used), -float(purchase_cost), float(profit), recipe.pill)
+                sort_key = (float(backpack_used), float(profit), -float(cost), recipe.pill)
                 round_candidates.append((sort_key, cand))
-            total_candidate_seen += len(round_candidates)
             skipped_total += round_skipped
             if not round_candidates:
                 break
+
             round_candidates.sort(key=lambda pair: pair[0], reverse=True)
-            best = round_candidates[0][1]
+            lookahead_current = round_candidates[:16]
+            rescored_candidates: List[Tuple[Tuple[float, float, float, float, str], Dict[str, Any]]] = []
+            for _, current in lookahead_current:
+                remaining = dict(available)
+                for material in current.get("materials", []):
+                    name = self.normalize_name(material.get("name", ""))
+                    used = int(material.get("backpack_used") or 0)
+                    if name and used > 0:
+                        remaining[name] = max(0, int(remaining.get(name, 0) or 0) - used)
+
+                next_best_used = 0
+                for _, next_candidate in round_candidates:
+                    next_used = 0
+                    can_execute = True
+                    trial_remaining = dict(remaining)
+                    for material in next_candidate.get("materials", []):
+                        name = self.normalize_name(material.get("name", ""))
+                        used = int(material.get("backpack_used") or 0)
+                        if not name or used <= 0 or int(trial_remaining.get(name, 0) or 0) < used:
+                            can_execute = False
+                            break
+                        trial_remaining[name] = int(trial_remaining.get(name, 0) or 0) - used
+                        next_used += used
+                    if can_execute:
+                        next_best_used = max(next_best_used, next_used)
+
+                current_used = int(current.get("backpack_used_total") or 0)
+                current_profit = float(current.get("score_profit", 0) or 0)
+                current_cost = float(current.get("cost", 0) or 0)
+                recipe: Recipe = current["recipe"]
+                rescored_candidates.append(
+                    (
+                        (
+                            float(current_used + next_best_used),
+                            float(current_used),
+                            current_profit,
+                            -current_cost,
+                            recipe.pill,
+                        ),
+                        current,
+                    )
+                )
+            rescored_candidates.sort(key=lambda pair: pair[0], reverse=True)
+            best = rescored_candidates[0][1]
             selected.append(best)
             for m in best.get("materials", []):
                 n = self.normalize_name(m.get("name", ""))
@@ -1343,7 +1432,7 @@ class AutoAlchemyOptimizer:
         total_candidate_seen = 0
         skipped_total = 0
 
-        for _ in range(self.max_batch_formula_count):
+        for _ in range(self.batch_alchemy_command_count):
             round_candidates: List[Tuple[Tuple[float, float, float, str], Dict[str, Any]]] = []
             round_skipped = 0
             for recipe in recipes:
@@ -1442,6 +1531,8 @@ class AutoAlchemyOptimizer:
                 await send_cb(f"🛒 坊市第 {job.current_page} 页发现 {len(dyn_queue)} 种符合最高价的药材，开始动态购买。")
                 if self.send_interval_sec > 0:
                     await asyncio.sleep(self.send_interval_sec)
+                if not self._job_can_continue(key, job):
+                    return True
                 await self._send_next_dynamic_buy(key, job, send_cb)
                 return True
         await self._advance_collecting_or_finish(key, job, send_cb)
@@ -1455,6 +1546,8 @@ class AutoAlchemyOptimizer:
             job.retry_count = 0
             if self.send_interval_sec > 0:
                 await asyncio.sleep(self.send_interval_sec)
+            if not self._job_can_continue(key, job):
+                return
             await self._send_page(job, send_cb)
             return
         if job.report_mode == "backpack_buy":
@@ -1467,6 +1560,8 @@ class AutoAlchemyOptimizer:
             f"📊 坊市价格采集完成：已获取 {len(job.prices)} 种药材价格。\n"
             "📦 正在读取药材背包用于背包抵扣。"
         )
+        if not self._job_can_continue(key, job):
+            return
         job.phase = "BAG_COLLECTING"
         job.current_page = 1
         job.backpack_pages_seen = []
@@ -1491,6 +1586,8 @@ class AutoAlchemyOptimizer:
 
     async def _send_next_dynamic_buy(self, key: str, job: AutoAlchemyJob, send_cb) -> None:
         """发送下一个动态购买指令。"""
+        if not self._job_can_continue(key, job):
+            return
         while job.dynamic_buy_index < len(job.dynamic_buy_queue):
             item = dict(job.dynamic_buy_queue[job.dynamic_buy_index] or {})
             name = self.normalize_name(item.get("name", ""))
@@ -1520,11 +1617,15 @@ class AutoAlchemyOptimizer:
                 job.updated_at = time.time()
                 if self.send_interval_sec > 0:
                     await asyncio.sleep(self.send_interval_sec)
+                if not self._job_can_continue(key, job):
+                    return True
                 await self._send_next_dynamic_buy(key, job, send_cb)
                 return True
             job.dynamic_busy_retry_done = True
             await send_cb(f"⏳ 小小繁忙，3秒后重试：{name}")
             await asyncio.sleep(3.0)
+            if not self._job_can_continue(key, job):
+                return True
             buy_cmd = item.get("buy_command", "")
             if buy_cmd:
                 job.last_command_ts = job.updated_at = time.time()
@@ -1546,9 +1647,13 @@ class AutoAlchemyOptimizer:
             job.updated_at = time.time()
             if self.send_interval_sec > 0:
                 await asyncio.sleep(self.send_interval_sec)
+            if not self._job_can_continue(key, job):
+                return True
             await self._send_next_dynamic_buy(key, job, send_cb)
             return True
-        # 购买失败或其他：跳过当前药材
+        if not self._is_purchase_recheck_fail(clean_text):
+            return False
+        # 明确的购买失败：跳过当前药材
         job.dynamic_buy_fail += 1
         job.dynamic_buy_current_item = {}
         job.dynamic_busy_retry_done = False
@@ -1556,6 +1661,8 @@ class AutoAlchemyOptimizer:
         job.updated_at = time.time()
         if self.send_interval_sec > 0:
             await asyncio.sleep(self.send_interval_sec)
+        if not self._job_can_continue(key, job):
+            return True
         await self._send_next_dynamic_buy(key, job, send_cb)
         return True
 
@@ -1645,11 +1752,11 @@ class AutoAlchemyOptimizer:
                     f"小小提示购买失败/需重新查看坊市，重试阶段仍失败，已最终标记缺材料{name or ''}"
                 )
             return True
-        return True
+        return False
 
     async def _handle_batch_refresh_page(self, key: str, job: AutoAlchemyJob, raw_text: str, clean_text: str, send_cb) -> bool:
         if not self._looks_like_market_text(clean_text):
-            return True
+            return False
         page_items = self.parse_market_items(raw_text)
         target = self.normalize_name(job.refresh_item_name)
         item = page_items.get(target)
@@ -1684,12 +1791,12 @@ class AutoAlchemyOptimizer:
             return True
         else:
             await send_cb(f"✅ {target} 价格未变化，已获取新的购买指令，继续购买。")
-        await self._send_fresh_purchase_command(job, send_cb, job.batch_current_item or item)
+        await self._send_fresh_purchase_command(key, job, send_cb, job.batch_current_item or item)
         return True
 
     async def _handle_alchemy_result(self, key: str, job: AutoAlchemyJob, raw_text: str, clean_text: str, send_cb) -> bool:
         if not self._is_alchemy_success(clean_text):
-            return True
+            return False
         current = job.alchemy_queue[job.alchemy_index] if 0 <= job.alchemy_index < len(job.alchemy_queue) else {}
         job.alchemy_success += 1
         job.alchemy_results.append(self._short_preview(clean_text, 220))
@@ -1701,6 +1808,8 @@ class AutoAlchemyOptimizer:
             return True
         if self.alchemy_send_interval_sec > 0:
             await asyncio.sleep(self.alchemy_send_interval_sec)
+        if not self._job_can_continue(key, job):
+            return True
         await self._send_next_alchemy_command(key, job, send_cb)
         return True
 
@@ -1760,6 +1869,8 @@ class AutoAlchemyOptimizer:
             if job.retry_count < self.max_page_retries:
                 job.retry_count += 1
                 await send_cb(f"⚠️ 炼丹拉取第 {job.current_page} 页超时，正在重试 {job.retry_count}/{self.max_page_retries}。")
+                if not self._job_can_continue(key, job):
+                    return
                 if job.phase == "BAG_COLLECTING":
                     await self._send_backpack_page(job, send_cb)
                 else:
@@ -1812,9 +1923,13 @@ class AutoAlchemyOptimizer:
             if job.retry_count < self.max_page_retries:
                 job.retry_count += 1
                 await send_cb(f"⚠️ 购买药材流程拉取第 {job.current_page} 页超时，正在重试 {job.retry_count}/{self.max_page_retries}。")
+                if not self._job_can_continue(key, job):
+                    return
                 await self._send_herb_buy_page(job, send_cb)
                 return
             await send_cb(f"⚠️ 购买药材流程第 {job.current_page} 页超时，跳过当前页。")
+            if not self._job_can_continue(key, job):
+                return
             await self._finish_herb_buy_page(key, job, send_cb)
             return
         if job.phase == "HERB_BUY_WAIT":
@@ -2140,7 +2255,7 @@ class AutoAlchemyOptimizer:
 
     def _select_profitable_best_by_pill(self, candidates: List[Dict[str, Any]], *, yield_count: Optional[int] = None, min_profit: Optional[float] = None) -> List[Dict[str, Any]]:
         yield_count = min(7, max(1, int(yield_count or self.default_yield_count)))
-        threshold = 0.0
+        threshold = float(self.min_profit_6pill if min_profit is None else min_profit)
         best_by_pill: Dict[str, Dict[str, Any]] = {}
         for cand in candidates:
             recipe: Recipe = cand["recipe"]
@@ -2167,7 +2282,7 @@ class AutoAlchemyOptimizer:
         return selected
 
     def _select_batch_primary_and_reserve(self, candidates: List[Dict[str, Any]], *, min_profit: Optional[float] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        threshold = 0.0
+        threshold = float(self.batch_mode_profit_threshold if min_profit is None else min_profit)
         valid = [c for c in candidates if float(c.get("score_profit", 0)) >= threshold]
         valid.sort(key=lambda x: (float(x.get("score_profit", 0)), -float(x.get("cost", 0)), x["recipe"].pill, self._candidate_uid(x)), reverse=True)
 
@@ -2182,20 +2297,11 @@ class AutoAlchemyOptimizer:
             base["formula_uid"] = uid
             deduped.append(base)
 
-        limit = int(self.max_batch_formula_count or 0)
-        primary_base = deduped[:limit] if limit > 0 else deduped
-        reserve_base = deduped[limit:] if limit > 0 else []
-
-        selected: List[Dict[str, Any]] = []
-        repeat = max(1, int(self.max_formula_per_pill or 1))
-        for base in primary_base:
-            uid = str(base.get("formula_uid") or self._candidate_uid(base))
-            for i in range(repeat):
-                item = self._clone_candidate(base)
-                item["formula_uid"] = uid
-                item["formula_repeat_index"] = i + 1
-                selected.append(item)
-        return selected, reserve_base
+        selected = self._expand_candidates_to_command_count(
+            deduped,
+            self.batch_alchemy_command_count,
+        )
+        return selected, []
 
     def _take_next_reserve_candidate(self, job: AutoAlchemyJob, used_uids: set[str]) -> Optional[Dict[str, Any]]:
         while job.batch_reserve_candidates:
@@ -2204,21 +2310,26 @@ class AutoAlchemyOptimizer:
             if not uid or uid in used_uids:
                 continue
             self._refresh_candidate_prices(cand, job.prices, job.buy_commands, job.pages_by_name)
-            if float(cand.get("score_profit", 0)) < 0:
+            threshold = self.batch_mode_profit_threshold if job.mode == "batch" else float(job.min_profit or 0)
+            if float(cand.get("score_profit", 0)) < threshold:
                 continue
             cand["formula_uid"] = uid
             used_uids.add(uid)
             return cand
         return None
 
-    def _expand_base_candidate_for_batch(self, base: Dict[str, Any], repeat_count: Optional[int] = None) -> List[Dict[str, Any]]:
-        repeat = max(1, int(repeat_count if repeat_count is not None else self.max_formula_per_pill or 1))
-        uid = str(base.get("formula_uid") or self._candidate_uid(base))
+    def _expand_candidates_to_command_count(self, bases: List[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
+        if not bases:
+            return []
+        repeat_by_uid: Dict[str, int] = {}
         out: List[Dict[str, Any]] = []
-        for i in range(repeat):
+        for i in range(max(0, int(count or 0))):
+            base = bases[i % len(bases)]
+            uid = str(base.get("formula_uid") or self._candidate_uid(base))
+            repeat_by_uid[uid] = int(repeat_by_uid.get(uid, 0)) + 1
             item = self._clone_candidate(base)
             item["formula_uid"] = uid
-            item["formula_repeat_index"] = i + 1
+            item["formula_repeat_index"] = repeat_by_uid[uid]
             out.append(item)
         return out
 
@@ -2229,7 +2340,6 @@ class AutoAlchemyOptimizer:
                 unknown.sort(key=lambda x: (float(x.get("cost", 0)), x["recipe"].pill))
                 return unknown[0]
         threshold = float(self.min_profit_6pill if min_profit is None else min_profit)
-        threshold = 0.0
         valid = [c for c in candidates if float(c.get("score_profit", 0)) >= threshold]
         if not valid:
             return None
@@ -2255,7 +2365,44 @@ class AutoAlchemyOptimizer:
         frozen["purchase_frozen"] = True
         return frozen
 
-    def _merge_existing_queue_candidates_with_new(self, old_active: List[Dict[str, Any]], new_selected: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    def _filter_candidates_fully_acquired(
+        self,
+        job: AutoAlchemyJob,
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        purchased = {self.normalize_name(k): int(v or 0) for k, v in (job.purchased_counts or {}).items()}
+        backpack = {self.normalize_name(k): int(v or 0) for k, v in (job.backpack_counts or {}).items()}
+        acquired: List[Dict[str, Any]] = []
+        for cand in candidates or []:
+            trial_purchased = dict(purchased)
+            trial_backpack = dict(backpack)
+            complete = True
+            for material in cand.get("materials", []):
+                name = self.normalize_name(material.get("name", ""))
+                if not name:
+                    complete = False
+                    break
+                qty = max(1, int(material.get("qty") or 1))
+                bag_target = min(qty, max(0, int(material.get("backpack_used") or 0)))
+                bag_used = min(bag_target, max(0, int(trial_backpack.get(name, 0) or 0)))
+                trial_backpack[name] = max(0, int(trial_backpack.get(name, 0) or 0) - bag_used)
+                purchase_needed = max(0, qty - bag_used)
+                if int(trial_purchased.get(name, 0) or 0) < purchase_needed:
+                    complete = False
+                    break
+                trial_purchased[name] = int(trial_purchased.get(name, 0) or 0) - purchase_needed
+            if complete:
+                acquired.append(cand)
+                purchased = trial_purchased
+                backpack = trial_backpack
+        return acquired
+
+    def _merge_existing_queue_candidates_with_new(
+        self,
+        old_active: List[Dict[str, Any]],
+        new_selected: List[Dict[str, Any]],
+        limit: int,
+    ) -> Tuple[List[Dict[str, Any]], int]:
         new_key_counts: Dict[Tuple[Tuple[str, str, int], ...], int] = {}
         for cand in new_selected or []:
             key = self._candidate_purchase_key(cand)
@@ -2269,7 +2416,9 @@ class AutoAlchemyOptimizer:
                 new_key_counts[key] = int(new_key_counts.get(key, 0)) - 1
                 continue
             frozen_old.append(self._freeze_candidate_for_existing_queue(cand))
-        return frozen_old + list(new_selected or []), len(frozen_old)
+        frozen_old = frozen_old[: max(0, int(limit or 0))]
+        new_limit = max(0, int(limit or 0) - len(frozen_old))
+        return frozen_old + list(new_selected or [])[:new_limit], len(frozen_old)
 
     def _build_batch_purchase_plan(self, selected: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         aggregate: Dict[str, Dict[str, Any]] = {}
@@ -2350,11 +2499,23 @@ class AutoAlchemyOptimizer:
         return True
 
     def _candidate_reusable_after_price_refresh(self, job: AutoAlchemyJob, cand: Dict[str, Any]) -> bool:
-        if not self._candidate_within_price_baseline(job, cand):
-            return False
+        if job.mode == "batch":
+            return self.batch_mode_plan_lock and float(cand.get("score_profit", 0)) >= float(self.batch_mode_profit_threshold)
+        if job.mode == "target":
+            if not self.target_mode_plan_lock:
+                return False
+            if job.formula_price_baselines and not self._candidate_within_price_baseline(job, cand):
+                return False
+            if cand.get("unknown_sale"):
+                return True
+            return float(cand.get("score_profit", 0)) >= float(job.min_profit or 0)
         if cand.get("unknown_sale"):
             return True
-        return float(cand.get("score_profit", 0)) >= 0
+        if job.mode == "backpack":
+            threshold = max(0.0, float(self.backpack_min_profit_6pill))
+        else:
+            threshold = float(job.min_profit or 0)
+        return float(cand.get("score_profit", 0)) >= threshold
 
     def _is_queue_item_pending(self, job: AutoAlchemyJob, item: Dict[str, Any]) -> bool:
         name = self.normalize_name(item.get("name", ""))
@@ -2407,6 +2568,20 @@ class AutoAlchemyOptimizer:
             new_item["qty"] = missing
             append_plan.append(new_item)
         return self._expand_purchase_queue(append_plan, {}, {})
+
+    def _replace_pending_purchase_queue_for_plan(self, job: AutoAlchemyJob) -> int:
+        job.batch_buy_queue = []
+        job.batch_buy_index = 0
+        job.batch_current_item = {}
+        job.deferred_retry_items = []
+        job.deferred_retry_names = []
+        job.retry_refresh_pages = []
+        job.retry_after_batch_started = False
+        job.retry_after_batch_active = False
+        replacement = self._build_incremental_purchase_queue(job, job.batch_purchase_plan or [])
+        job.batch_buy_queue = replacement
+        self._refresh_batch_buy_expected_preserving_queue(job)
+        return len(replacement)
 
     def _refresh_batch_buy_expected_preserving_queue(self, job: AutoAlchemyJob) -> None:
         remaining = max(0, len(job.batch_buy_queue or []) - max(0, int(job.batch_buy_index or 0)))
@@ -2511,12 +2686,10 @@ class AutoAlchemyOptimizer:
                 selected, reserve = self._select_batch_primary_and_reserve(candidates, min_profit=threshold)
             else:
                 base_selected = self._select_profitable_best_by_pill(candidates, yield_count=job.yield_count, min_profit=threshold)
-                selected = []
-                for base in base_selected[: self.max_batch_formula_count or len(base_selected)]:
-                    uid = self._candidate_uid(base)
-                    base = self._clone_candidate(base)
-                    base["formula_uid"] = uid
-                    selected.extend(self._expand_base_candidate_for_batch(base))
+                selected = self._expand_candidates_to_command_count(
+                    base_selected,
+                    self.batch_alchemy_command_count,
+                )
                 reserve = []
             job.batch_selected = selected
             job.batch_reserve_candidates = reserve
@@ -2612,6 +2785,8 @@ class AutoAlchemyOptimizer:
             job.failed_counts[target] = int(job.failed_counts.get(target, 0) or 0) + 1
 
     async def _send_next_batch_purchase_or_start_alchemy(self, key: str, job: AutoAlchemyJob, send_cb) -> None:
+        if not self._job_can_continue(key, job):
+            return
         while job.batch_buy_index < len(job.batch_buy_queue):
             item = dict(job.batch_buy_queue[job.batch_buy_index] or {})
             name = self.normalize_name(item.get("name", ""))
@@ -2652,7 +2827,7 @@ class AutoAlchemyOptimizer:
                 item["purchase_round"] = round_no
                 if page:
                     item["page"] = page
-                await self._send_fresh_purchase_command(job, send_cb, item)
+                await self._send_fresh_purchase_command(key, job, send_cb, item)
                 return
             if name and page > 0:
                 job.phase = "BATCH_BUY_REFRESHING"
@@ -2680,7 +2855,7 @@ class AutoAlchemyOptimizer:
 
     async def _handle_round_refresh_page(self, key: str, job: AutoAlchemyJob, raw_text: str, clean_text: str, send_cb) -> bool:
         if not self._looks_like_market_text(clean_text):
-            return True
+            return False
 
         page_no = int(job.round_refreshing_page or job.current_page or 0)
         page_items = self.parse_market_items(raw_text)
@@ -2706,6 +2881,8 @@ class AutoAlchemyOptimizer:
             job.retry_count = 0
             if self.send_interval_sec > 0:
                 await asyncio.sleep(self.send_interval_sec)
+            if not self._job_can_continue(key, job):
+                return True
             await self._send_page(job, send_cb)
             return True
 
@@ -2797,11 +2974,13 @@ class AutoAlchemyOptimizer:
         job.retry_count = 0
         job.updated_at = time.time()
         await send_cb(f"🔁 重试失败药材：先刷新第 {page} 页，随后立即购买本页失败药材。")
+        if not self._job_can_continue(key, job):
+            return
         await self._send_page(job, send_cb)
 
     async def _handle_retry_refresh_page(self, key: str, job: AutoAlchemyJob, raw_text: str, clean_text: str, send_cb) -> bool:
         if not self._looks_like_market_text(clean_text):
-            return True
+            return False
         self._merge_market_page(job, raw_text, int(job.current_page))
         await self._start_retry_queue_after_refresh(key, job, send_cb)
         return True
@@ -2851,11 +3030,20 @@ class AutoAlchemyOptimizer:
         await send_cb(msg)
         await self._send_next_batch_purchase_or_start_alchemy(key, job, send_cb)
 
-    async def _send_fresh_purchase_command(self, job: AutoAlchemyJob, send_cb, item: Dict[str, Any]) -> None:
+    async def _send_fresh_purchase_command(self, key: str, job: AutoAlchemyJob, send_cb, item: Dict[str, Any]) -> None:
+        if not self._job_can_continue(key, job):
+            return
         name = self.normalize_name(item.get("name", ""))
         cmd = self._normalize_buy_command(str(item.get("buy_command") or ""))
         if not name or not cmd:
             return
+        if job.batch_buy_sent > 0 and self.batch_buy_send_interval_sec > 0:
+            elapsed = max(0.0, time.time() - float(job.last_command_ts or 0))
+            delay = max(0.0, self.batch_buy_send_interval_sec - elapsed)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if not self._job_can_continue(key, job):
+                return
         job.phase = "BATCH_BUY_WAIT"
         job.batch_current_item = dict(item)
         job.batch_buy_sent += 1
@@ -2941,7 +3129,8 @@ class AutoAlchemyOptimizer:
                     q["page"] = int(job.pages_by_name.get(name) or q.get("page") or 0)
             self._refresh_batch_buy_expected_preserving_queue(job)
             active_count = len([c for c in job.batch_selected if not c.get("abandoned")])
-            return True, f"🔄 {target} 价格由 {self._fmt_num(old_price)}万 变为 {self._fmt_num(new_price)}万；当前丹方仍在基准波动范围内且利润非负，继续沿用。当前购买队列保持不变，剩余可炼制队列：{active_count}炉。"
+            threshold = self.batch_mode_profit_threshold if job.mode == "batch" else float(job.min_profit or 0)
+            return True, f"🔄 {target} 价格由 {self._fmt_num(old_price)}万 变为 {self._fmt_num(new_price)}万；当前丹方利润仍不低于 {self._fmt_num(threshold)}万，继续沿用。当前购买队列保持不变，剩余可炼制队列：{active_count}炉。"
 
         try:
             candidates, _, _ = self._compute_candidates(
@@ -2961,7 +3150,7 @@ class AutoAlchemyOptimizer:
         abandoned_notes: List[str] = []
         new_selected: List[Dict[str, Any]] = []
 
-        if job.mode == "target" and not self.target_mode_plan_lock:
+        if job.mode == "target":
             allow_unknown = self.target_unknown_price_execute and job.target_pill not in FIXED_PILL_SALE_PRICE
             best = self._select_best_for_target(candidates, min_profit=job.min_profit, allow_unknown_sale=allow_unknown)
             if best:
@@ -2980,20 +3169,19 @@ class AutoAlchemyOptimizer:
                     recipe: Recipe = cand["recipe"]
                     job.abandoned_pills[recipe.pill] = "价格超出基准范围或利润为负，且当前无可切换丹方"
                     abandoned_notes.append(recipe.pill)
-                new_selected = list(job.batch_selected or [])
+                new_selected = []
         else:
+            threshold = self.batch_mode_profit_threshold
             if self.batch_repeat_until_threshold:
-                selected_base, reserve = self._select_batch_primary_and_reserve(candidates, min_profit=job.min_profit)
+                selected_base, reserve = self._select_batch_primary_and_reserve(candidates, min_profit=threshold)
                 job.batch_reserve_candidates = reserve
                 new_selected = selected_base
             else:
-                base_selected = self._select_profitable_best_by_pill(candidates, yield_count=job.yield_count, min_profit=job.min_profit)
-                new_selected = []
-                for base in base_selected[: self.max_batch_formula_count or len(base_selected)]:
-                    uid = self._candidate_uid(base)
-                    base = self._clone_candidate(base)
-                    base["formula_uid"] = uid
-                    new_selected.extend(self._expand_base_candidate_for_batch(base))
+                base_selected = self._select_profitable_best_by_pill(candidates, yield_count=job.yield_count, min_profit=threshold)
+                new_selected = self._expand_candidates_to_command_count(
+                    base_selected,
+                    self.batch_alchemy_command_count,
+                )
                 job.batch_reserve_candidates = []
             if new_selected:
                 old_names = sorted({c["recipe"].pill for c in active if c.get("recipe")})
@@ -3010,19 +3198,40 @@ class AutoAlchemyOptimizer:
                     recipe: Recipe = cand["recipe"]
                     job.abandoned_pills[recipe.pill] = "价格超出基准范围或利润为负，且当前无可切换丹方"
                     abandoned_notes.append(recipe.pill)
-                new_selected = list(job.batch_selected or [])
+                new_selected = []
 
         frozen_count = 0
         if new_selected:
-            new_selected, frozen_count = self._merge_existing_queue_candidates_with_new(active, new_selected)
+            if job.mode == "target":
+                keep_threshold = float(job.min_profit or 0)
+                old_eligible = [
+                    cand for cand in active
+                    if cand.get("unknown_sale") or float(cand.get("score_profit", 0)) >= keep_threshold
+                ]
+                command_limit = max(1, int(job.target_rounds or 1))
+            else:
+                keep_threshold = float(self.batch_mode_profit_threshold)
+                old_eligible = [cand for cand in active if float(cand.get("score_profit", 0)) >= keep_threshold]
+                command_limit = self.batch_alchemy_command_count
+            old_eligible = self._filter_candidates_fully_acquired(job, old_eligible)
+            for cand in active:
+                if cand in old_eligible:
+                    continue
+                cand["abandoned"] = True
+                recipe: Recipe = cand["recipe"]
+                job.abandoned_pills[recipe.pill] = f"价格变化后利润低于 {self._fmt_num(keep_threshold)}万"
+                abandoned_notes.append(recipe.pill)
+            new_selected, frozen_count = self._merge_existing_queue_candidates_with_new(
+                old_eligible,
+                new_selected,
+                command_limit,
+            )
 
         job.batch_selected = new_selected
         self._prune_formula_price_baselines(job)
         job.batch_purchase_plan = self._build_purchase_plan_for_job(job)
         job.batch_formula_texts = [self._format_recipe_send_command(c["recipe"], c["materials"]) for c in job.batch_selected if not c.get("abandoned")]
-        appended = self._append_new_purchase_items_preserving_queue(job, self._build_incremental_purchase_queue(job, job.batch_purchase_plan))
-        self._refresh_batch_buy_expected_preserving_queue(job)
-        job.batch_current_item = job.batch_current_item or {}
+        appended = self._replace_pending_purchase_queue_for_plan(job)
 
         active_count = len([c for c in job.batch_selected if not c.get("abandoned")])
         note = f"🔄 {target} 价格由 {self._fmt_num(old_price)}万 变为 {self._fmt_num(new_price)}万；已触发丹方重新排序。\n"
@@ -3032,7 +3241,7 @@ class AutoAlchemyOptimizer:
             note += "以下丹方暂不继续新增采购：" + "、".join(sorted(set(abandoned_notes))) + "。\n"
         if frozen_count:
             note += f"已保留旧队列对应丹方 {frozen_count} 炉用于消化已生成采购；这些旧丹方不再新增采购。\n"
-        note += f"当前已生成购买队列保持原顺序；新增采购追加 {appended} 项；剩余可炼制队列：{active_count}炉。"
+        note += f"已按新方案替换尚未发送的购买队列，共 {appended} 项；剩余可炼制队列：{active_count}炉。"
         return active_count > 0 or bool(job.purchased_counts) or bool(job.batch_buy_queue), note
 
     def _refresh_candidate_prices(self, cand: Dict[str, Any], prices: Dict[str, float], buy_commands: Dict[str, str], pages_by_name: Dict[str, int]) -> None:
@@ -3052,6 +3261,8 @@ class AutoAlchemyOptimizer:
         self._attach_command_efficiency(cand, use_purchase_qty=bool(cand.get("backpack_used_total") is not None))
 
     async def _start_alchemy_sequence(self, key: str, job: AutoAlchemyJob, send_cb) -> None:
+        if not self._job_can_continue(key, job):
+            return
         job.alchemy_queue = self._build_alchemy_queue_from_purchased(job)
         job.alchemy_index = 0
         job.alchemy_sent = 0
@@ -3118,6 +3329,8 @@ class AutoAlchemyOptimizer:
         return queue
 
     async def _send_next_alchemy_command(self, key: str, job: AutoAlchemyJob, send_cb) -> None:
+        if not self._job_can_continue(key, job):
+            return
         if job.alchemy_index >= len(job.alchemy_queue):
             self.jobs.pop(key, None)
             await send_cb(self._format_full_done_report(job))
@@ -3257,7 +3470,8 @@ class AutoAlchemyOptimizer:
 
 
     def _format_no_profitable_report(self, job: AutoAlchemyJob, candidate_count: int, price_count: int, skipped_count: int) -> str:
-        return f"❌ 未找到不亏本丹方。成丹{job.yield_count}颗。"
+        threshold = self.batch_mode_profit_threshold if job.mode == "batch" else float(job.min_profit or 0)
+        return f"❌ 未找到利润 >= {self._fmt_num(threshold)}万 的丹方。成丹{job.yield_count}颗。"
 
     def _format_batch_buy_plan_report(self, job: AutoAlchemyJob, candidate_count: int, skipped_count: int) -> str:
         selected = [c for c in (job.batch_selected or []) if not c.get("abandoned")]
@@ -3282,12 +3496,12 @@ class AutoAlchemyOptimizer:
         title = "✅【炼丹流程结束】" if not no_alchemy else "✅【炼丹购买结束】"
         lines.append(title)
         lines.append(f"购买成功：{job.batch_success_count}/{job.batch_buy_expected}｜炼丹成功：{job.alchemy_success}/{len(job.alchemy_queue)}")
-        active = [c for c in (job.batch_selected or []) if not c.get("abandoned")]
-        total_profit = sum(float(c.get("score_profit", 0)) for c in active if not c.get("unknown_sale"))
+        completed = list((job.alchemy_queue or [])[: max(0, min(int(job.alchemy_success or 0), len(job.alchemy_queue or [])))])
+        total_profit = sum(float(item.get("profit", 0) or 0) for item in completed)
         lines.append(f"预计利润：{self._fmt_num(total_profit)}万")
-        if job.alchemy_queue:
+        if completed:
             lines.append("\n🧾【利润丹方】")
-            for idx, item in enumerate(job.alchemy_queue[: self.max_profitable_report_count], 1):
+            for idx, item in enumerate(completed[: self.max_profitable_report_count], 1):
                 profit = self._fmt_num(item.get("profit", 0))
                 lines.append(f"{idx}. {item.get('pill', '')}｜利润 {profit}万｜{item.get('command', '')}")
         if job.skipped_alchemy:
@@ -3362,9 +3576,9 @@ class AutoAlchemyOptimizer:
         except Exception:
             return []
         if self.batch_repeat_until_threshold:
-            selected = self._select_profitable_all_candidates(candidates, min_profit=self.min_profit_6pill)
+            selected = self._select_profitable_all_candidates(candidates, min_profit=self.batch_mode_profit_threshold)
         else:
-            selected = self._select_profitable_best_by_pill(candidates, yield_count=self.default_yield_count, min_profit=self.min_profit_6pill)
+            selected = self._select_profitable_best_by_pill(candidates, yield_count=self.default_yield_count, min_profit=self.batch_mode_profit_threshold)
         pages: set[int] = set()
         for cand in selected:
             for m in cand.get("materials", []):

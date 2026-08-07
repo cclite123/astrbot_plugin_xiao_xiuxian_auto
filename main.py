@@ -673,9 +673,8 @@ class XiaoXiuxianAuto(Star):
             logger=logger,
         )
         logger.info(
-            "[xiao_xiuxian_auto] 炼丹配置：max_batch_formula_count=%s, max_formula_per_pill=%s, refresh_pages_each_buy_round=%s",
-            self.auto_alchemy.max_batch_formula_count,
-            self.auto_alchemy.max_formula_per_pill,
+            "[xiao_xiuxian_auto] 炼丹配置：batch_alchemy_command_count=%s, refresh_pages_each_buy_round=%s",
+            self.auto_alchemy.batch_alchemy_command_count,
             self.auto_alchemy.refresh_pages_each_buy_round,
         )
 
@@ -1848,7 +1847,7 @@ class XiaoXiuxianAuto(Star):
                     "说明：开启后，炼丹遍历坊市时会购买符合最高价的药材（仅当前页，不触发多轮购买）。\n"
                     "\n"
                     "说明：开启炼丹会遍历坊市1-8页采集价格，然后读取背包药材进行背包抵扣，筛选利润>配置阈值的丹方；"
-                    "开启背包炼丹只使用背包药材，不做坊市购买，盈利>10万即可匹配丹方。")
+                    "开启背包炼丹只使用背包药材，不做坊市购买，会持续炼制材料完整且利润不低于配置阈值的丹方。")
 
         elif sub_menu == "灵界":
             return (f"📜 【灵界升级模块】指令说明 📜\n"

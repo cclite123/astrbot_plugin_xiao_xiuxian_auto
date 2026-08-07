@@ -15,7 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from astrbot_plugin_xiao_xiuxian_auto.auto_alchemy_optimizer import AutoAlchemyJob, AutoAlchemyOptimizer
+from astrbot_plugin_xiao_xiuxian_auto.auto_alchemy_optimizer import (
+    AutoAlchemyJob,
+    AutoAlchemyOptimizer,
+    MaterialReq,
+    Recipe,
+)
 from astrbot_plugin_xiao_xiuxian_auto.bounty import BountyController, BountyState
 from astrbot_plugin_xiao_xiuxian_auto.cultivate import (
     CultivateController,
@@ -109,6 +114,7 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+        controller.jobs[key] = job
 
         await controller._send_next_dynamic_buy(
             key,
@@ -125,6 +131,94 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "at",
             plugin._build_message(plugin._official_messages[0])[0]["type"],
         )
+
+    def test_backpack_accepts_break_even_recipe(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"backpack_min_profit_6pill": 0},
+        )
+        controller._load_recipes = lambda: [
+            Recipe(
+                pill="摄魂鬼丸",
+                grade="",
+                furnace="测试炉",
+                materials=[
+                    MaterialReq("主药", "甲药", 1),
+                    MaterialReq("药引", "乙药", 1),
+                    MaterialReq("辅药", "丙药", 1),
+                ],
+            )
+        ]
+        job = AutoAlchemyJob(
+            mode="backpack",
+            yield_count=6,
+            backpack_counts={"甲药": 1, "乙药": 1, "丙药": 1},
+            prices={"甲药": 300, "乙药": 200, "丙药": 280},
+        )
+
+        selected, _, _ = controller._select_backpack_best_candidates(job)
+
+        self.assertEqual(1, len(selected))
+        self.assertEqual(0.0, selected[0]["score_profit"])
+
+    def test_backpack_selection_consumes_inventory_until_no_recipe(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"backpack_min_profit_6pill": 0},
+        )
+        controller._load_recipes = lambda: [
+            Recipe(
+                pill="摄魂鬼丸",
+                grade="",
+                furnace="测试炉",
+                materials=[
+                    MaterialReq("主药", "甲药", 1),
+                    MaterialReq("药引", "乙药", 1),
+                    MaterialReq("辅药", "丙药", 1),
+                ],
+            )
+        ]
+        job = AutoAlchemyJob(
+            mode="backpack",
+            yield_count=6,
+            backpack_counts={"甲药": 7, "乙药": 7, "丙药": 7},
+            prices={"甲药": 100, "乙药": 100, "丙药": 100},
+        )
+
+        selected, _, _ = controller._select_backpack_best_candidates(job)
+
+        self.assertEqual(7, len(selected))
+
+    def test_backpack_rejects_recipe_with_missing_inventory_materials(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"backpack_min_profit_6pill": 0},
+        )
+        controller._load_recipes = lambda: [
+            Recipe(
+                pill="摄魂鬼丸",
+                grade="",
+                furnace="测试炉",
+                materials=[
+                    MaterialReq("主药", "甲药", 1),
+                    MaterialReq("药引", "乙药", 1),
+                    MaterialReq("辅药", "丙药", 1),
+                ],
+            )
+        ]
+        job = AutoAlchemyJob(
+            mode="backpack",
+            yield_count=6,
+            backpack_counts={"甲药": 1},
+            prices={"甲药": 100, "乙药": 100, "丙药": 100},
+        )
+
+        selected, _, _ = controller._select_backpack_best_candidates(job)
+
+        self.assertEqual([], selected)
 
     async def test_due_state_machine_ticks_return_and_do_not_reenter_without_delay(self):
         key = "10001:20002"

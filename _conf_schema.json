@@ -238,12 +238,6 @@
         "type": "float",
         "default": 1.2
       },
-      "batch_buy_result_timeout_sec": {
-        "description": "批量购买整体等待时间（秒）",
-        "type": "float",
-        "hint": "旧字段，保留兼容。",
-        "default": 180.0
-      },
       "max_profitable_report_count": {
         "description": "盈利丹方最大展示数",
         "type": "int",
@@ -253,12 +247,6 @@
         "description": "购买回执超时（秒）",
         "type": "float",
         "hint": "30 秒无有效回执则结束验证码空窗期，跳过当前购买并继续后续流程。",
-        "default": 30.0
-      },
-      "captcha_wait_sec": {
-        "description": "验证码等待窗口（秒）",
-        "type": "float",
-        "hint": "超时后恢复继续。",
         "default": 30.0
       },
       "busy_retry_delay_sec": {
@@ -290,12 +278,6 @@
         "hint": "页码稳定时可减少每次全量查 1-8 页。",
         "default": true
       },
-      "merge_buy_queue": {
-        "description": "合并同名药材购买需求",
-        "type": "bool",
-        "hint": "合并后仍会记录丹方材料归属。",
-        "default": true
-      },
       "batch_mode_plan_lock": {
         "description": "批量模式方案锁",
         "type": "bool",
@@ -314,17 +296,11 @@
         "hint": "是否允许同一丹药匹配多条盈利丹方，直到低于利润阈值。",
         "default": true
       },
-      "max_batch_formula_count": {
-        "description": "批量模式最大主丹方数",
+      "batch_alchemy_command_count": {
+        "description": "批量炼丹指令总次数",
         "type": "int",
-        "hint": "本轮最多锁定的主丹方数量。",
-        "default": 6
-      },
-      "max_formula_per_pill": {
-        "description": "每条主丹方炼制炉数",
-        "type": "int",
-        "hint": "总炉数约为 max_batch_formula_count × max_formula_per_pill。最小按 1 处理。",
-        "default": 6
+        "hint": "每次发送「开启炼丹」后计划实际执行的炼丹指令总数；每次指令按默认成丹数量计算利润。",
+        "default": 30
       },
       "batch_fast_start_from_snapshot": {
         "description": "快速启动从快照",
@@ -368,12 +344,6 @@
         "hint": "指定丹药如果没有固定炼金售价，是否允许按最低成本丹方执行，不做利润判断。",
         "default": true
       },
-      "backpack_max_formula_count": {
-        "description": "背包炼丹最大丹方数",
-        "type": "int",
-        "hint": "背包模式不强求最高利润，优先匹配已有药材。",
-        "default": 10
-      },
       "backpack_use_existing_as_free": {
         "description": "背包药材抵扣采购",
         "type": "bool",
@@ -383,7 +353,7 @@
       "backpack_min_profit_6pill": {
         "description": "背包炼丹最低利润（万）",
         "type": "int",
-        "hint": "0 表示只要 6 丹利润为正就允许炼制。",
+        "hint": "0 表示允许保本丹方；背包模式会持续选择，直到没有材料完整且利润达标的丹方。",
         "default": 0
       },
       "backpack_require_existing_material": {
