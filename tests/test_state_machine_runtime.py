@@ -56,6 +56,76 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(count):
             await asyncio.wait_for(controller.tick(key, send), timeout=0.5)
 
+    async def test_alchemy_dynamic_buy_completion_resumes_market_collection(self):
+        key = "10001:20002"
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"send_interval_sec": 0},
+        )
+        send = SendRecorder()
+        job = AutoAlchemyJob(
+            phase="COLLECTING_DYN_BUY_WAIT",
+            report_mode="batch_buy",
+            mode="batch",
+            scan_pages=[1, 2],
+            scan_index=0,
+            current_page=1,
+            dynamic_buy_queue=[{"name": "测试药材", "buy_command": "购买测试药材"}],
+            dynamic_buy_index=1,
+        )
+        controller.jobs[key] = job
+
+        await controller._send_next_dynamic_buy(key, job, send)
+        handled = await controller.on_official_text(
+            key,
+            "坊市药材第2页\n价格：20万 [七星草](mqqapi://aio/inlinecmd?command=buy2)",
+            send,
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(20.0, job.prices.get("七星草"))
+        self.assertEqual(0, job.dynamic_buy_fail)
+
+    async def test_alchemy_dynamic_buy_preserves_official_at_target(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        plugin = _make_plugin_shell(main)
+        plugin._rewrite_official_target = types.MethodType(
+            main.XiaoXiuxianAuto._rewrite_official_target,
+            plugin,
+        )
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"send_interval_sec": 0},
+        )
+        job = AutoAlchemyJob(
+            phase="COLLECTING",
+            dynamic_buy_queue=[
+                {
+                    "name": "七星草",
+                    "buy_command": "坊市购买abc 1",
+                }
+            ],
+        )
+
+        await controller._send_next_dynamic_buy(
+            key,
+            job,
+            plugin._make_send_cb(key),
+        )
+
+        self.assertEqual([], plugin._raw_messages)
+        self.assertEqual(
+            ["@3889001741 坊市购买abc 1"],
+            plugin._official_messages,
+        )
+        self.assertEqual(
+            "at",
+            plugin._build_message(plugin._official_messages[0])[0]["type"],
+        )
+
     async def test_due_state_machine_ticks_return_and_do_not_reenter_without_delay(self):
         key = "10001:20002"
         now = time.time()

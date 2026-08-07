@@ -1501,8 +1501,9 @@ class AutoAlchemyOptimizer:
             job.phase = "COLLECTING_DYN_BUY_WAIT"
             job.dynamic_buy_current_item = item
             job.last_command_ts = job.updated_at = time.time()
-            await send_cb(buy_cmd)
+            await send_cb(f"@{self.official_qq} {buy_cmd}")
             return
+        job.phase = "COLLECTING"
         await self._advance_collecting_or_finish(key, job, send_cb)
 
     async def _handle_collecting_dyn_buy_result(self, key: str, job: AutoAlchemyJob, raw_text: str, clean_text: str, send_cb) -> bool:
@@ -1527,7 +1528,7 @@ class AutoAlchemyOptimizer:
             buy_cmd = item.get("buy_command", "")
             if buy_cmd:
                 job.last_command_ts = job.updated_at = time.time()
-                await send_cb(buy_cmd)
+                await send_cb(f"@{self.official_qq} {buy_cmd}")
                 return True
             job.dynamic_buy_fail += 1
             job.dynamic_buy_current_item = {}
