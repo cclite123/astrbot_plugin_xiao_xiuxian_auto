@@ -125,6 +125,92 @@ class AlchemyRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(5, len(selected))
 
+    def test_normal_candidates_reject_herb_above_global_purchase_limit(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"max_herb_purchase_price_wan": 100},
+        )
+        controller._load_recipes = lambda: [
+            make_inventory_recipe(
+                "limited",
+                [("主药", "甲药", 1), ("药引", "乙药", 1), ("辅药", "丙药", 1)],
+            )
+        ]
+
+        candidates, skipped, _ = controller._compute_candidates(
+            {"甲药": 1, "乙药": 101, "丙药": 1},
+        )
+
+        self.assertEqual([], candidates)
+        self.assertEqual(1, skipped)
+
+    def test_backpack_owned_expensive_herb_does_not_trigger_purchase_limit(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"batch_alchemy_command_count": 1, "max_herb_purchase_price_wan": 100},
+        )
+        controller._load_recipes = lambda: [
+            make_inventory_recipe(
+                "backpack-limit",
+                [("主药", "甲药", 1), ("药引", "乙药", 1), ("辅药", "丙药", 1)],
+            )
+        ]
+        prices = {"甲药": 101, "乙药": 1, "丙药": 1}
+        owned_job = AutoAlchemyJob(
+            mode="batch",
+            yield_count=6,
+            backpack_counts={"甲药": 1},
+            prices=prices,
+        )
+        missing_job = AutoAlchemyJob(mode="batch", yield_count=6, prices=prices)
+
+        owned_selected, _, _ = controller._select_batch_with_backpack(owned_job, threshold=50)
+        missing_selected, _, _ = controller._select_batch_with_backpack(missing_job, threshold=50)
+
+        self.assertEqual(1, len(owned_selected))
+        self.assertEqual([], missing_selected)
+
+    def test_dynamic_purchase_honors_global_purchase_limit(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"max_herb_purchase_price_wan": 100},
+        )
+        controller.herb_max_prices = {"甲药": 200, "乙药": 200}
+
+        queue = controller._collect_dynamic_buy_items(
+            {
+                "甲药": {"price": 101, "buy_command": "坊市购买甲 1"},
+                "乙药": {"price": 100, "buy_command": "坊市购买乙 1"},
+            },
+            1,
+        )
+
+        self.assertEqual(["乙药"], [item["name"] for item in queue])
+
+    async def test_purchase_send_guard_skips_price_above_global_limit(self):
+        controller = AutoAlchemyOptimizer(
+            official_qq="3889001741",
+            recipe_path="",
+            config={"max_herb_purchase_price_wan": 100},
+        )
+        key = "10001:20002"
+        item = {"name": "甲药", "unit_price": 101, "buy_command": "坊市购买甲 1"}
+        job = AutoAlchemyJob(
+            phase="BUYING",
+            batch_buy_queue=[item],
+            batch_purchase_plan=[dict(item, qty=1)],
+        )
+        controller.jobs[key] = job
+        send = SendRecorder()
+
+        await controller._send_fresh_purchase_command(key, job, send, item)
+
+        self.assertFalse(any("@3889001741 坊市购买" in message for message in send.messages))
+        self.assertTrue(any("超过炼丹购药上限" in message for message in send.messages))
+
     async def test_stop_during_alchemy_delay_does_not_send_next_command(self):
         controller = AutoAlchemyOptimizer(
             official_qq="3889001741",

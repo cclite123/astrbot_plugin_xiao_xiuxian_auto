@@ -238,6 +238,12 @@
         "type": "float",
         "default": 1.2
       },
+      "max_herb_purchase_price_wan": {
+        "description": "炼丹购药单价上限（万）",
+        "type": "float",
+        "hint": "药材实时单价超过该值时不购买，并改选其他达标丹方；0 表示不限制。背包已有药材不受此限制。",
+        "default": 0
+      },
       "max_profitable_report_count": {
         "description": "盈利丹方最大展示数",
         "type": "int",

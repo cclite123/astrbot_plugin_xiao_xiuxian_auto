@@ -230,6 +230,7 @@ class AutoAlchemyOptimizer:
         self.min_profit_6pill = float(cfg.get("min_profit_6pill", cfg.get("min_profit", 100)))
         self.batch_buy_enabled = bool(cfg.get("batch_buy_enabled", True))
         self.batch_buy_send_interval_sec = max(0.0, float(cfg.get("batch_buy_send_interval_sec", self.send_interval_sec)))
+        self.max_herb_purchase_price_wan = max(0.0, float(cfg.get("max_herb_purchase_price_wan", 0)))
         self.max_profitable_report_count = max(1, int(cfg.get("max_profitable_report_count", 30)))
         self.busy_retry_delay_sec = max(1.0, float(cfg.get("busy_retry_delay_sec", 15.0)))
         self.target_unknown_price_execute = bool(cfg.get("target_unknown_price_execute", True))
@@ -989,11 +990,17 @@ class AutoAlchemyOptimizer:
 
     async def cmd_status(self, key: str) -> str:
         job = self.jobs.get(key)
+        purchase_limit = (
+            f"{self._fmt_num(self.max_herb_purchase_price_wan)}万"
+            if self.max_herb_purchase_price_wan > 0
+            else "不限制"
+        )
         if not job:
             return (
                 "炼丹流程：当前没有运行中的流程。\n"
                 f"当前批量配置：计划执行 {self.batch_alchemy_command_count} 次炼丹指令\n"
                 f"利润阈值：{self.batch_mode_profit_threshold}万 | 背包抵扣：{'是' if self.use_backpack_for_batch_mode else '否'}\n"
+                f"购药单价上限：{purchase_limit}\n"
                 f"动态购买：{'已开启' if self.dynamic_herb_buy_during_scan else '已关闭'}"
             )
         if job.phase in {"COLLECTING", "COLLECTING_DYN_BUY_WAIT"}:
@@ -1014,6 +1021,7 @@ class AutoAlchemyOptimizer:
                 f"炼丹流程：{mode_label}采集中\n"
                 f"{count_text}\n"
                 f"利润阈值：{self._fmt_num(threshold)}万 | 背包抵扣：{'是' if self.use_backpack_for_batch_mode else '否'}\n"
+                f"购药单价上限：{purchase_limit}\n"
                 f"当前页：{job.current_page}\n"
                 f"待采集页：{'、'.join(map(str, job.scan_pages))}\n"
                 f"已采集药材价格：{len(job.prices)} 条\n"
@@ -1035,6 +1043,7 @@ class AutoAlchemyOptimizer:
                 f"{count_text}\n"
                 f"默认成丹数：{job.yield_count}\n"
                 f"筛选规则：单次炼丹预计利润 >= {self._fmt_num(threshold)}万\n"
+                f"购药单价上限：{purchase_limit}\n"
                 f"当前药材：{name}\n"
                 f"购买进度：{job.batch_success_count}/{job.batch_buy_expected}\n"
                 f"失败跳过：{sum(job.failed_counts.values())}"
@@ -1434,6 +1443,8 @@ class AutoAlchemyOptimizer:
                 materials = resolved.get("materials", [])
                 total_candidate_seen += 1
                 backpack_used = sum(int(m.get("backpack_used") or 0) for m in materials)
+                if not self._materials_within_purchase_price_limit(materials, use_purchase_qty=True):
+                    continue
                 sale = float(FIXED_PILL_SALE_PRICE.get(recipe.pill, 0))
                 cost = float(resolved.get("recipe_cost", resolved.get("missing_cost", 0)) or 0)
                 purchase_cost = float(resolved.get("missing_cost", 0) or 0)
@@ -1567,7 +1578,7 @@ class AutoAlchemyOptimizer:
                 continue
             price = float(item.get("price") or 0)
             buy_cmd = self._normalize_buy_command(str(item.get("buy_command") or ""))
-            if price <= 0 or price > max_price or not buy_cmd:
+            if price <= 0 or price > max_price or not self._is_herb_purchase_price_allowed(price) or not buy_cmd:
                 continue
             queue.append({"name": name, "unit_price": price, "buy_command": buy_cmd, "page": page, "qty": 1})
         queue.sort(key=lambda x: x.get("name", ""))
@@ -2182,6 +2193,25 @@ class AutoAlchemyOptimizer:
         cand["profit_per_command"] = score_profit / max(1, command_count)
         return cand
 
+    def _is_herb_purchase_price_allowed(self, price: float) -> bool:
+        price = float(price or 0)
+        return self.max_herb_purchase_price_wan <= 0 or price <= self.max_herb_purchase_price_wan
+
+    def _materials_within_purchase_price_limit(
+        self,
+        materials: List[Dict[str, Any]],
+        *,
+        use_purchase_qty: bool = False,
+    ) -> bool:
+        if self.max_herb_purchase_price_wan <= 0:
+            return True
+        for material in materials or []:
+            if use_purchase_qty and int(material.get("purchase_qty") or 0) <= 0:
+                continue
+            if not self._is_herb_purchase_price_allowed(float(material.get("unit_price") or 0)):
+                return False
+        return True
+
     def _candidate_efficiency_sort_key(self, cand: Dict[str, Any]) -> Tuple[float, float, float, str, str]:
         return (
             float(cand.get("profit_per_command", 0) or 0),
@@ -2211,6 +2241,9 @@ class AutoAlchemyOptimizer:
                 continue
             if resolved.get("wildcard_missing"):
                 skipped_no_wildcard += 1
+                continue
+            if not self._materials_within_purchase_price_limit(resolved["materials"]):
+                skipped_no_price += 1
                 continue
             cost = sum(float(x["qty"]) * float(x["unit_price"]) for x in resolved["materials"])
             sale_known = recipe.pill in FIXED_PILL_SALE_PRICE
@@ -2467,6 +2500,13 @@ class AutoAlchemyOptimizer:
         return True
 
     def _candidate_reusable_after_price_refresh(self, job: AutoAlchemyJob, cand: Dict[str, Any]) -> bool:
+        materials = list(cand.get("materials", []) or [])
+        use_purchase_qty = any("purchase_qty" in material for material in materials)
+        if not self._materials_within_purchase_price_limit(
+            materials,
+            use_purchase_qty=use_purchase_qty,
+        ):
+            return False
         if job.mode == "batch":
             return self.batch_mode_plan_lock and float(cand.get("score_profit", 0)) >= float(self.batch_mode_profit_threshold)
         if job.mode == "target":
@@ -2658,7 +2698,8 @@ class AutoAlchemyOptimizer:
                     f"坊市价格数：{len(job.prices)}\n"
                     f"可计算候选数：{candidate_count}\n"
                     f"跳过配方数：{skipped_count}\n"
-                    f"筛选规则：成丹 {job.yield_count} 颗利润 > {threshold}万，背包药材背包抵扣。"
+                    f"筛选规则：成丹 {job.yield_count} 颗利润 > {threshold}万，背包药材背包抵扣。\n"
+                    f"购药单价上限：{self._fmt_num(self.max_herb_purchase_price_wan) + '万' if self.max_herb_purchase_price_wan > 0 else '不限制'}。"
                 )
                 return
             await self._prepare_and_start_buying(key, job, send_cb, candidate_count, skipped_count)
@@ -3030,6 +3071,15 @@ class AutoAlchemyOptimizer:
         name = self.normalize_name(item.get("name", ""))
         cmd = self._normalize_buy_command(str(item.get("buy_command") or ""))
         if not name or not cmd:
+            return
+        unit_price = float(item.get("unit_price") or job.prices.get(name, 0) or 0)
+        if not self._is_herb_purchase_price_allowed(unit_price):
+            await self._skip_current_purchase_and_continue(
+                key,
+                job,
+                send_cb,
+                f"{name} 当前单价 {self._fmt_num(unit_price)}万，超过炼丹购药上限 {self._fmt_num(self.max_herb_purchase_price_wan)}万",
+            )
             return
         if job.batch_buy_sent > 0 and self.batch_buy_send_interval_sec > 0:
             elapsed = max(0.0, time.time() - float(job.last_command_ts or 0))
@@ -3538,7 +3588,10 @@ class AutoAlchemyOptimizer:
 
     def _format_no_profitable_report(self, job: AutoAlchemyJob, candidate_count: int, price_count: int, skipped_count: int) -> str:
         threshold = self.batch_mode_profit_threshold if job.mode == "batch" else float(job.min_profit or 0)
-        return f"❌ 未找到利润 >= {self._fmt_num(threshold)}万 的丹方。成丹{job.yield_count}颗。"
+        report = f"❌ 未找到利润 >= {self._fmt_num(threshold)}万 的丹方。成丹{job.yield_count}颗。"
+        if self.max_herb_purchase_price_wan > 0:
+            report += f"\n购药单价上限：{self._fmt_num(self.max_herb_purchase_price_wan)}万。"
+        return report
 
     def _format_batch_buy_plan_report(self, job: AutoAlchemyJob, candidate_count: int, skipped_count: int) -> str:
         selected = [c for c in (job.batch_selected or []) if not c.get("abandoned")]
@@ -3549,6 +3602,8 @@ class AutoAlchemyOptimizer:
         lines: List[str] = []
         lines.append(f"💰【{title}利润丹方】")
         lines.append(f"成丹：{job.yield_count}颗｜丹方：{len(selected)}条｜购买：{total_purchase_count}次｜预计利润：{self._fmt_num(total_profit)}万")
+        if self.max_herb_purchase_price_wan > 0:
+            lines.append(f"购药单价上限：{self._fmt_num(self.max_herb_purchase_price_wan)}万")
         for idx, cand in enumerate(selected, 1):
             r: Recipe = cand["recipe"]
             if cand.get("unknown_sale"):
