@@ -2,17 +2,31 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from .storage import JsonStore
     from .time_utils import fmt_ts
+    from .linjie_upgrade import (
+        LinjiePageParser,
+        LinjiePlanner,
+        LinjieSnapshot,
+        LinjieSnapshotRepository,
+    )
 except ImportError:
     from storage import JsonStore
     from time_utils import fmt_ts
+    from linjie_upgrade import (
+        LinjiePageParser,
+        LinjiePlanner,
+        LinjieSnapshot,
+        LinjieSnapshotRepository,
+    )
 
 
 BUILDING_ORDER = [
@@ -139,6 +153,12 @@ class LinjieCandidate:
     gain: float
     command: str
     note: str = ""
+    available_after_seconds: int = 0
+    projected_balance_after: float = 0.0
+    route_name: Optional[str] = None
+    route_target_count: Optional[int] = None
+    route_target_level: Optional[int] = None
+    amount: int = 1
 
     @property
     def roi_days(self) -> float:
@@ -173,6 +193,10 @@ class LinjieState:
     abundance: bool = True
     buildings: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     last_plan: Dict[str, Any] = field(default_factory=dict)
+    # 混合规划器使用的四页原文和严格解析快照。保留在旧状态文件中，
+    # 使现有命令入口/账号键继续可用，同时允许模块化 planner 逐步接管。
+    page_texts: Dict[str, str] = field(default_factory=dict)
+    module_snapshot: Dict[str, Any] = field(default_factory=dict)
     last_query_ts: float = 0.0
     last_update_ts: float = 0.0
 
@@ -285,6 +309,19 @@ class LinjieUpgradeController:
         self.include_skill_training = bool(cfg.get("include_skill_training", True))
         self.include_skill_breakthrough = bool(cfg.get("include_skill_breakthrough", False))
         self.max_sim_steps = max(3, int(cfg.get("max_sim_steps", 15)))
+        self.planner_engine = str(cfg.get("planner_engine", "hybrid") or "hybrid").strip().lower()
+        if self.planner_engine not in {"legacy", "hybrid", "module"}:
+            self.planner_engine = "hybrid"
+        self.planning_strategy = str(cfg.get("planning_strategy", "roi") or "roi").strip().lower()
+        if self.planning_strategy not in {"roi", "time"}:
+            self.planning_strategy = "roi"
+        snapshot_root = str(
+            cfg.get("snapshot_root")
+            or os.path.join(os.path.dirname(os.path.abspath(str(getattr(store, "path", "linjie_state.json")))), "linjie_snapshots")
+        )
+        self.module_parser = LinjiePageParser()
+        self.module_planner = LinjiePlanner()
+        self.module_snapshots = LinjieSnapshotRepository(snapshot_root)
 
     def _info(self, msg: str) -> None:
         if self.log:
@@ -297,6 +334,110 @@ class LinjieUpgradeController:
     def _warning(self, msg: str) -> None:
         if self.log:
             self.log.warning(msg)
+
+    @staticmethod
+    def _module_group_id() -> str:
+        """旧控制器使用 ``self_id:group_id`` 作为单键，模块仓储使用固定兼容群键。"""
+        return "legacy"
+
+    def _module_snapshot(self, st: LinjieState) -> Optional[LinjieSnapshot]:
+        if self.planner_engine == "legacy" or not st.module_snapshot:
+            return None
+        try:
+            snapshot = LinjieSnapshot.from_dict(st.module_snapshot)
+        except (TypeError, ValueError):
+            return None
+        try:
+            collected_at = datetime.fromisoformat(snapshot.collected_at)
+            if (datetime.now(collected_at.tzinfo) - collected_at).total_seconds() > self.cache_ttl_sec:
+                return None
+        except (TypeError, ValueError):
+            return None
+        return snapshot
+
+    def _can_use_cached_state(self, st: LinjieState) -> bool:
+        """首次迁移时强制建立严格快照；格式不兼容时允许明确回退旧解析。"""
+        return (
+            self.planner_engine == "legacy"
+            or self._module_snapshot(st) is not None
+            or bool(st.last_plan.get("module_parse_failed"))
+        )
+
+    def _module_candidate(self, candidate) -> LinjieCandidate:
+        kind = {"upgrade": "tech", "worker_rank": "rank"}.get(candidate.kind, candidate.kind)
+        return LinjieCandidate(
+            kind=kind,
+            name=candidate.name,
+            cost=float(candidate.cost),
+            gain=float(candidate.gain),
+            command=candidate.command,
+            note=candidate.note,
+            available_after_seconds=int(candidate.available_after_seconds),
+            projected_balance_after=float(candidate.projected_balance_after),
+            route_name=candidate.route_name,
+            route_target_count=candidate.route_target_count,
+            route_target_level=candidate.route_target_level,
+            amount=int(candidate.amount or 1),
+        )
+
+    def _module_candidates(self, st: LinjieState) -> List[LinjieCandidate]:
+        snapshot = self._module_snapshot(st)
+        if snapshot is None:
+            return []
+        try:
+            return [self._module_candidate(item) for item in self.module_planner.candidates(snapshot)]
+        except (TypeError, ValueError, StopIteration) as exc:
+            self._warning(f"[linjie] 模块化灵界候选生成失败，回退旧公式：{exc}")
+            return []
+
+    def _module_plan(self, st: LinjieState) -> List[LinjieCandidate]:
+        snapshot = self._module_snapshot(st)
+        if snapshot is None:
+            return []
+        try:
+            return [self._module_candidate(item) for item in self.module_planner.plan(snapshot, strategy=self.planning_strategy)]
+        except (TypeError, ValueError, StopIteration) as exc:
+            self._warning(f"[linjie] 模块化灵界路线生成失败，回退旧公式：{exc}")
+            return []
+
+    def _refresh_module_snapshot(self, key: str, st: LinjieState) -> bool:
+        page_texts = dict(st.page_texts or {})
+        if set(page_texts) != {"profile", "buildings", "upgrades", "workers"}:
+            st.last_plan["module_parse_failed"] = True
+            return False
+        try:
+            pages = {
+                "profile": self.module_parser.parse_profile(page_texts["profile"]),
+                "buildings": self.module_parser.parse_buildings(page_texts["buildings"]),
+                "upgrades": self.module_parser.parse_upgrades(page_texts["upgrades"]),
+                "workers": self.module_parser.parse_workers(page_texts["workers"]),
+            }
+            snapshot = self.module_snapshots.replace_from_pages(
+                str(key),
+                self._module_group_id(),
+                pages,
+                collected_at=datetime.now().astimezone(),
+            )
+        except (TypeError, ValueError, OSError) as exc:
+            st.last_plan["module_parse_failed"] = True
+            self._warning(f"[linjie] 四页严格快照解析失败，继续使用兼容解析：{exc}")
+            return False
+        st.module_snapshot = snapshot.to_dict()
+        # 以官方快照的总量字段校正旧状态，旧命令/状态页仍然读取这些字段。
+        st.balance = float(snapshot.balance)
+        st.total_speed = float(snapshot.total_output.total)
+        st.skill_dao = int(snapshot.skill_dao)
+        st.skill_realm = int(snapshot.skill_realm)
+        st.worker_rank = int(snapshot.worker_rank)
+        st.worker_total = int(snapshot.worker_total)
+        st.worker_capacity = int(snapshot.worker_capacity)
+        st.worker_rank_cost = float(snapshot.rank_cost)
+        st.monthly_card = bool(snapshot.has_monthly_card)
+        st.page_texts = {}
+        st.last_plan["module_parse_failed"] = False
+        st.last_plan["planner_engine"] = "module"
+        st.last_plan["planner_strategy"] = self.planning_strategy
+        return True
 
     async def _get(self, key: str) -> LinjieState:
         return LinjieState.from_dict(await self.store.get(f"linjie:{key}"))
@@ -319,7 +460,7 @@ class LinjieUpgradeController:
         st.enabled = True
         st.failure_count = 0
         st.blocked_commands = []
-        if self._cache_fresh(st):
+        if self._cache_fresh(st) and self._can_use_cached_state(st):
             st.phase = "RUNNING"
             st.next_action_ts = time.time() + self.success_delay_sec
             st.after_query = ""
@@ -358,7 +499,7 @@ class LinjieUpgradeController:
 
     async def cmd_plan(self, key: str, send_cb) -> str:
         st = await self._get(key)
-        if self._cache_fresh(st):
+        if self._cache_fresh(st) and self._can_use_cached_state(st):
             cand, affordable = self._best_affordable_or_waiting(st)
             return self._format_plan_reply(st, cand, affordable)
         self._start_query(st, "PLAN")
@@ -373,7 +514,7 @@ class LinjieUpgradeController:
 
     async def cmd_plan_detail(self, key: str, send_cb) -> str:
         st = await self._get(key)
-        if self._cache_fresh(st):
+        if self._cache_fresh(st) and self._can_use_cached_state(st):
             return self._format_plan_detail_reply(st)
         self._start_query(st, "PLAN_DETAIL")
         await self._set(key, st)
@@ -381,7 +522,7 @@ class LinjieUpgradeController:
 
     async def cmd_plan_sequence(self, key: str, send_cb) -> str:
         st = await self._get(key)
-        if self._cache_fresh(st):
+        if self._cache_fresh(st) and self._can_use_cached_state(st):
             return self._format_plan_sequence_reply(st)
         self._start_query(st, "PLAN_SEQUENCE")
         await self._set(key, st)
@@ -406,7 +547,11 @@ class LinjieUpgradeController:
             return f"攒矿中，下次 {fmt_ts(st.wake_at_ts)}"
         if st.next_action_ts:
             return f"下一动作 {fmt_ts(st.next_action_ts)}"
-        return {"RUNNING": "运行中", "IDLE": "待机"}.get(st.phase, st.phase or "待机")
+        return {
+            "RUNNING": "运行中",
+            "IDLE": "待机",
+            "PAUSED": "已暂停（结果未知，避免重发）",
+        }.get(st.phase, st.phase or "待机")
 
     def _start_query(self, st: LinjieState, after_query: str, commands: Optional[List[str]] = None) -> None:
         query_commands = list(commands or QUERY_COMMANDS)
@@ -434,6 +579,8 @@ class LinjieUpgradeController:
         st.abundance = self.default_abundance
         st.buildings = {}
         st.last_plan = {}
+        st.page_texts = {}
+        st.module_snapshot = {}
         st.last_query_ts = 0.0
 
     async def tick(self, key: str, send_cb) -> None:
@@ -463,14 +610,10 @@ class LinjieUpgradeController:
             return
 
         if st.phase == "WAITING_RESULT" and st.next_action_ts and now >= st.next_action_ts:
-            st.failure_count += 1
-            if st.failure_count >= self.max_failures:
-                await self._stop_for_failures(key, st, send_cb, "等待升级回执超时")
-                return
-            st.phase = "RUNNING"
-            st.pending_action = {}
-            st.next_action_ts = now + self.success_delay_sec
-            await self._set(key, st)
+            # 资源动作可能已经在官方侧成功，超时后自动重发会造成重复建造/招募。
+            # 保留现有状态并暂停，交由用户重新开启或刷新后再继续。
+            await self._pause_for_unknown_result(key, st, send_cb, "等待灵界动作回执超时，结果未知")
+            return
 
     async def _send_next_query(self, key: str, st: LinjieState, send_cb) -> None:
         commands = st.query_commands or QUERY_COMMANDS
@@ -489,6 +632,7 @@ class LinjieUpgradeController:
     async def _finish_query(self, key: str, st: LinjieState, send_cb) -> None:
         st.failure_count = 0
         st.blocked_commands = []
+        self._refresh_module_snapshot(key, st)
         after_query = st.after_query
         st.after_query = ""
         st.query_commands = []
@@ -570,6 +714,14 @@ class LinjieUpgradeController:
 
         if st.phase == "QUERYING" and st.awaiting_query:
             if self._query_response_matches(st.awaiting_query, parsed_kind, text):
+                page_kind = {
+                    "灵界我的信息": "profile",
+                    "灵界建筑列表": "buildings",
+                    "灵界升级列表": "upgrades",
+                    "灵界杂役名录": "workers",
+                }.get(st.awaiting_query)
+                if page_kind:
+                    st.page_texts[page_kind] = text
                 st.awaiting_query = ""
                 st.query_index += 1
                 st.next_action_ts = time.time() + self.success_delay_sec
@@ -582,7 +734,12 @@ class LinjieUpgradeController:
                 st.failure_count = 0
                 st.pending_action = {}
                 st.blocked_commands = []
-                confirm_commands = self._confirm_commands_for_action(pending) if (self.confirm_after_success or self._success_needs_confirm(st, pending)) else []
+                if self._module_snapshot(st) is not None:
+                    # 模块化规划依赖完整官方快照；每次成功后四页原子重查，
+                    # 避免只更新局部页面造成组合路线成本/门槛过期。
+                    confirm_commands = list(QUERY_COMMANDS)
+                else:
+                    confirm_commands = self._confirm_commands_for_action(pending) if (self.confirm_after_success or self._success_needs_confirm(st, pending)) else []
                 if confirm_commands:
                     self._start_query(st, "RUN" if st.enabled else "", confirm_commands)
                 else:
@@ -975,6 +1132,12 @@ class LinjieUpgradeController:
             item["tech_available"] = True
 
     def _best_affordable_or_waiting(self, st: LinjieState) -> Tuple[Optional[LinjieCandidate], bool]:
+        module_plan = self._module_plan(st)
+        if module_plan:
+            spendable = max(0.0, st.balance - self.reserve_lingkuang)
+            unblocked = [c for c in module_plan if c.command not in st.blocked_commands] or module_plan
+            best = unblocked[0]
+            return best, best.cost <= spendable
         candidates = self._build_candidates(st)
         if not candidates:
             return None, False
@@ -984,6 +1147,9 @@ class LinjieUpgradeController:
         return best, best.cost <= spendable
 
     def _build_candidates(self, st: LinjieState) -> List[LinjieCandidate]:
+        module_candidates = self._module_candidates(st)
+        if module_candidates:
+            return module_candidates
         if self.roi_formula_source != "game_display":
             return self._build_candidates_excel(st)
         return self._build_candidates_display(st)
@@ -1092,10 +1258,56 @@ class LinjieUpgradeController:
 
         return [c for c in candidates if c.cost > 0 and c.gain > 0]
 
+    def _module_multi_step_plan(self, st: LinjieState) -> List[Dict[str, Any]]:
+        snapshot = self._module_snapshot(st)
+        if snapshot is None:
+            return []
+        try:
+            planned = self.module_planner.multi_step_plan(
+                snapshot,
+                strategy=self.planning_strategy,
+                max_steps=self.max_sim_steps,
+            )
+        except (TypeError, ValueError, StopIteration) as exc:
+            self._warning(f"[linjie] 模块化灵界长线推演失败，回退旧模拟：{exc}")
+            return []
+        balance = float(snapshot.balance)
+        speed = max(0.0, float(snapshot.total_output.total))
+        steps: List[Dict[str, Any]] = []
+        for candidate in planned:
+            cost = float(candidate.cost)
+            gain = float(candidate.gain)
+            affordable = balance >= cost
+            wait_sec = 0.0
+            if not affordable:
+                wait_sec = (cost - balance) / max(1.0, speed)
+                balance = 0.0
+            balance = max(0.0, balance - cost)
+            steps.append({
+                "kind": candidate.kind,
+                "name": candidate.name,
+                "cost": cost,
+                "gain": gain,
+                "command": candidate.command,
+                "note": candidate.note,
+                "affordable": affordable,
+                "wait_sec": wait_sec,
+                "available_after_seconds": candidate.available_after_seconds,
+                "projected_balance_after": candidate.projected_balance_after,
+                "route_name": candidate.route_name,
+                "route_target_count": candidate.route_target_count,
+                "route_target_level": candidate.route_target_level,
+                "amount": candidate.amount,
+            })
+            speed += gain
+        return steps
+
     def _simulate_multi_step_plan(self, st: LinjieState) -> List[Dict[str, Any]]:
         """多步滚动 ROI 贪心模拟，与 Excel 保持一致。
         每一步：从当前模拟态生成全部候选 → 选 ROI 最优 → 应用状态变更 → 进入下一步。
         """
+        if self._module_snapshot(st) is not None:
+            return self._module_multi_step_plan(st)
         sim_buildings: Dict[str, Dict[str, Any]] = {}
         for name, item in st.buildings.items():
             sim_buildings[name] = {
@@ -1319,6 +1531,12 @@ class LinjieUpgradeController:
             "gain": cand.gain,
             "command": cand.command,
             "note": cand.note,
+            "available_after_seconds": cand.available_after_seconds,
+            "projected_balance_after": cand.projected_balance_after,
+            "route_name": cand.route_name,
+            "route_target_count": cand.route_target_count,
+            "route_target_level": cand.route_target_level,
+            "amount": cand.amount,
         }
 
     def _candidate_from_dict(self, data: Dict[str, Any]) -> Optional[LinjieCandidate]:
@@ -1332,6 +1550,12 @@ class LinjieUpgradeController:
                 gain=float(data.get("gain") or 0.0),
                 command=str(data.get("command") or ""),
                 note=str(data.get("note") or ""),
+                available_after_seconds=int(data.get("available_after_seconds") or 0),
+                projected_balance_after=float(data.get("projected_balance_after") or 0.0),
+                route_name=(str(data.get("route_name")) if data.get("route_name") else None),
+                route_target_count=(int(data.get("route_target_count")) if data.get("route_target_count") is not None else None),
+                route_target_level=(int(data.get("route_target_level")) if data.get("route_target_level") is not None else None),
+                amount=int(data.get("amount") or 1),
             )
         except Exception:
             return None
@@ -1350,7 +1574,11 @@ class LinjieUpgradeController:
             return "📋【灵界规划】当前缓存里没有可规划项目。"
         lines = [
             "📋【灵界规划】",
-            f"ROI模式：{'Excel公式' if self.roi_formula_source != 'game_display' else '游戏显示值'}",
+            (
+                f"规划器：官方显示值组合路线（{self.planning_strategy}）"
+                if self._module_snapshot(st) is not None
+                else f"ROI模式：{'Excel公式' if self.roi_formula_source != 'game_display' else '游戏显示值'}"
+            ),
             f"灵矿石：{format_money(st.balance)}",
             f"秒产估算：{format_speed(st.total_speed)}",
             self._format_candidate_line(cand, st, affordable),
@@ -1373,7 +1601,11 @@ class LinjieUpgradeController:
         candidates.sort(key=lambda c: c.roi_days)
         lines = [
             "📋【灵界规划详情】",
-            f"ROI模式：{'Excel公式' if self.roi_formula_source != 'game_display' else '游戏显示值'}",
+            (
+                f"规划器：官方显示值组合路线（{self.planning_strategy}）"
+                if self._module_snapshot(st) is not None
+                else f"ROI模式：{'Excel公式' if self.roi_formula_source != 'game_display' else '游戏显示值'}"
+            ),
             f"灵矿石：{format_money(st.balance)}，可用：{format_money(spendable)}",
             f"月卡：{'是' if st.monthly_card else '否'}，丰饶：{'是' if st.abundance else '否'}，杂役等阶：LV{st.worker_rank if st.worker_rank >= 0 else '未知'}",
             f"缓存时间：{format_duration(max(0.0, time.time() - st.last_query_ts))}前",
@@ -1444,7 +1676,11 @@ class LinjieUpgradeController:
             return "📋【灵界规划序列】当前缓存没有可规划的模拟步骤。"
         lines = [
             "📋【灵界规划序列】多步 ROI 滚动模拟",
-            f"ROI模式：{'Excel公式' if self.roi_formula_source != 'game_display' else '游戏显示值'}",
+            (
+                f"规划器：官方显示值组合路线（{self.planning_strategy}）"
+                if self._module_snapshot(st) is not None
+                else f"ROI模式：{'Excel公式' if self.roi_formula_source != 'game_display' else '游戏显示值'}"
+            ),
             f"灵矿石：{format_money(st.balance)}，月卡：{'是' if st.monthly_card else '否'}，丰饶：{'是' if st.abundance else '否'}，杂役等阶：LV{st.worker_rank if st.worker_rank >= 0 else '未知'}",
             "",
         ]
@@ -1488,3 +1724,12 @@ class LinjieUpgradeController:
         await self._set(key, st)
         if send_cb:
             await send_cb(f"🛑 灵界升级已停止：{reason}，连续失败 {st.failure_count}/{self.max_failures}。")
+
+    async def _pause_for_unknown_result(self, key: str, st: LinjieState, send_cb, reason: str) -> None:
+        st.phase = "PAUSED"
+        st.next_action_ts = 0.0
+        st.wake_at_ts = 0.0
+        st.pending_action = {}
+        await self._set(key, st)
+        if send_cb:
+            await send_cb(f"⚠️ 灵界升级已暂停：{reason}，为避免重复执行不会自动重发；确认官方状态后请重新开启或刷新规划。")

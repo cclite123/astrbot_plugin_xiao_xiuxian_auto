@@ -109,6 +109,12 @@ LINJIE_UPGRADE_CONFIG_DEFAULTS = {
         "include_skill_breakthrough": False,
         "_comment_max_sim_steps": "多步滚动 ROI 模拟最大步数；默认15步，用于「灵界规划序列」和「灵界规划详情」。",
         "max_sim_steps": 15,
+        "_comment_planner_engine": "规划器模式；hybrid 优先使用官方四页组合规划，解析失败时回退旧公式。",
+        "planner_engine": "hybrid",
+        "_comment_planning_strategy": "规划排序策略；roi 为回本优先，time 为最快获取主线。",
+        "planning_strategy": "roi",
+        "_comment_snapshot_root": "模块化灵界快照目录；留空时使用插件 data/linjie_snapshots。",
+        "snapshot_root": "",
     },
 }
 
@@ -661,6 +667,8 @@ class XiaoXiuxianAuto(Star):
             logger=logger,
         )
         linjie_cfg = dict(self.cfg.get("linjie_upgrade", {}) or {})
+        if not linjie_cfg.get("snapshot_root"):
+            linjie_cfg["snapshot_root"] = os.path.join(self.data_dir, "linjie_snapshots")
         self.linjie = LinjieUpgradeController(
             store=self.store,
             official_qq=official_qq,
@@ -823,10 +831,13 @@ class XiaoXiuxianAuto(Star):
             config=auto_cfg,
             logger=logger,
         )
+        linjie_cfg = dict(cfg.get("linjie_upgrade", {}) or {})
+        if not linjie_cfg.get("snapshot_root"):
+            linjie_cfg["snapshot_root"] = os.path.join(self.data_dir, "linjie_snapshots")
         linjie = LinjieUpgradeController(
             store=self.store,
             official_qq=official_qq,
-            config=dict(cfg.get("linjie_upgrade", {}) or {}),
+            config=linjie_cfg,
             logger=logger,
         )
         endless = EndlessTowerController(

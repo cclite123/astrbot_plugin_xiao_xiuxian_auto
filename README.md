@@ -50,7 +50,8 @@ xiaoxiuxian/
 ├── cultivate.py                # 修炼闭关：气血监控、模式切换、活动挂起/恢复
 ├── inventory_ops.py            # 背包操作：一键上架/一键炼金（分页采集+批量执行）
 ├── auto_alchemy_optimizer.py   # 炼丹：利润计算、批量购买+炼制全流程
-├── linjie.py                   # 灵界升级：状态解析、ROI 选择、缓存推进
+├── linjie.py                   # 灵界升级兼容层：入口、旧缓存和状态机
+├── linjie_upgrade/             # 灵界升级模块化核心：四页解析、快照、组合路线和时间策略
 ├── endless.py                  # 无尽妖塔：真元检测、闭关恢复、挑战循环
 ├── market_price.py             # 坊市价格：混合数据源（远程+本地）管理
 ├── storage.py                  # JSON 存储引擎：异步读写、原子写入、定时刷盘
@@ -217,7 +218,9 @@ xiaoxiuxian/
 | `无尽状态` | 查看无尽妖塔运行状态 |
 
 首次启动新版插件时，会自动在本地 `config.json` 中补齐缺失的 `linjie_upgrade`、`endless_tower` 配置项；已有配置值不会被覆盖。
-默认 `roi_formula_source` 为 `excel_formula`，即按本地 Excel 复刻公式计算 ROI；如需按游戏回执显示的单项增量计算，可改为 `game_display`。
+兼容回退模式默认 `roi_formula_source` 为 `excel_formula`，即按本地 Excel 复刻公式计算 ROI；如需按游戏回执显示的单项增量计算，可改为 `game_display`。
+灵界规划默认使用官方四页显示值的组合路线；严格解析失败时回退兼容公式。
+可将 `planning_strategy` 设为 `roi`（回本优先）或 `time`（最快获取主线），将 `planner_engine` 设为 `legacy` 可临时停用模块化规划。
 
 ### 修炼指令
 
