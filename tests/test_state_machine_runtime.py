@@ -307,6 +307,59 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     f"{name} tick re-entered without advancing state: {send.messages!r}",
                 )
 
+    async def test_bounty_settlement_waits_for_reply_before_retrying(self):
+        key = "10001:20002"
+        now = time.time()
+        controller = BountyController(
+            MemoryStore(),
+            "3889001741",
+            response_timeout_sec=300,
+        )
+        await controller._set(
+            key,
+            BountyState(
+                enabled=True,
+                phase="WORKING",
+                settle_at_ts=now - 1,
+                last_action_ts=now - 1000,
+                current_title="测试悬赏",
+            ),
+        )
+        send = SendRecorder()
+
+        await controller.tick(key, send)
+        await controller.tick(key, send)
+
+        state = await controller._get(key)
+        self.assertEqual(["@3889001741 悬赏令结算"], send.messages)
+        self.assertEqual("WAITING_SETTLE", state.phase)
+        self.assertEqual("settle", state.pending_action)
+        self.assertEqual(0, state.retry_count)
+        self.assertGreaterEqual(state.last_action_ts, now - 1)
+
+    async def test_bounty_duplicate_empty_reply_does_not_repeat_refresh(self):
+        key = "10001:20002"
+        controller = BountyController(MemoryStore(), "3889001741")
+        await controller._set(
+            key,
+            BountyState(
+                enabled=True,
+                phase="WAITING_QUERY",
+                pending_action="query",
+                last_action_ts=time.time(),
+            ),
+        )
+        send = SendRecorder()
+        empty_reply = "当前未查询到道友的悬赏令信息"
+
+        await controller.on_official_text(key, empty_reply, send)
+        await controller.on_official_text(key, empty_reply, send)
+
+        state = await controller._get(key)
+        self.assertEqual(["@3889001741 悬赏令刷新"], send.messages)
+        self.assertEqual("WAITING_REFRESH", state.phase)
+        self.assertEqual("refresh", state.pending_action)
+
     async def test_only_secret_entry_waits_for_a_fresh_hp_reply(self):
         main = _import_main_with_astrbot_stubs()
         key = "10001:20002"
@@ -338,6 +391,39 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await plugin.secret.cmd_enable(key, plugin._make_send_cb(key))
 
         self.assertEqual(["@3889001741 探索秘境"], plugin._official_messages)
+
+    async def test_secret_completion_restores_suspended_seclusion_after_one_done_reply(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        plugin = _make_plugin_shell(main)
+        send_cb = plugin._make_send_cb(key)
+
+        await plugin.cultivate._set(
+            key,
+            CultivateState(
+                mode=MODE_SECLUSION,
+                is_resting=False,
+                suspended_for_activity=True,
+            ),
+        )
+        await plugin.secret._set(
+            key,
+            SecretState(enabled=True, phase="VERIFYING", daily_count=1),
+        )
+
+        await plugin.secret.on_official_text(
+            key,
+            "已经参加过本次秘境",
+            send_cb,
+        )
+        await plugin._maybe_restore_rest_after_activities_done(key, send_cb)
+
+        secret_state = await plugin.secret._get(key)
+        cultivate_state = await plugin.cultivate._get(key)
+        self.assertEqual("SLEEPING", secret_state.phase)
+        self.assertTrue(cultivate_state.is_resting)
+        self.assertFalse(cultivate_state.suspended_for_activity)
+        self.assertIn("@3889001741 闭关", plugin._official_messages)
 
     async def test_secret_low_hp_uses_temporary_cultivation_then_restores_idle(self):
         main = _import_main_with_astrbot_stubs()

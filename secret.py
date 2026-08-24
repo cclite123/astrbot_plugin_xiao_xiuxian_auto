@@ -196,17 +196,13 @@ class SecretController:
 
 
 
-            if st.done_streak >= 2:
-                await self._enter_sleep_until_next_day(
-                    key, st, send_cb, reason=f"今日共完成 {st.daily_count} 轮")
-            else:
-                st.phase = "PROBING"
-                st.current_area = ""
-                st.settle_at_ts = 0.0
-                st.next_step_ts = 0.0
-                st.last_action_ts = time.time()
-                await self._set(key, st)
-                await send_cb(f"@{self.official_qq} 探索秘境")
+            # A single official reply is enough to confirm that today's
+            # secret run has been consumed.  Waiting for a second identical
+            # reply left the controller in PROBING when the bot only emitted
+            # one completion response, which also prevented the main loop
+            # from restoring a suspended cultivation/seclusion mode.
+            await self._enter_sleep_until_next_day(
+                key, st, send_cb, reason=f"今日共完成 {st.daily_count} 轮")
             return
 
         m = RE_SECRET_START.search(text)

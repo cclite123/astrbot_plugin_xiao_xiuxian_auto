@@ -348,7 +348,10 @@ class BountyController:
             return
 
 
-        if RE_NO_TASK.search(text) and st.phase in {"WAITING_QUERY", "WAITING_REFRESH"}:
+        # A repeated empty reply can be the delayed response to an earlier
+        # query.  Once a refresh is already pending, wait for its normal
+        # timeout instead of enqueueing the same refresh again.
+        if RE_NO_TASK.search(text) and st.phase == "WAITING_QUERY":
             st.phase = "WAITING_REFRESH"
             st.pending_action = "refresh"
             st.retry_count = 0
@@ -371,6 +374,7 @@ class BountyController:
             st.retry_count = 0
             st.current_title = chosen.title
             st.selected_index = chosen.index
+            st.last_action_ts = time.time()
             await self._set(key, st)
 
             if any(s in (chosen.extra or "") or s in (chosen.title or "") for s in PRIORITY_SPECIAL_ITEMS):
@@ -388,6 +392,7 @@ class BountyController:
             st.retry_count = 0
             st.current_title = m_accept.group("title").strip()
             st.settle_at_ts = time.time() + minutes * 60 + self.post_finish_delay_sec
+            st.last_action_ts = time.time()
             await self._set(key, st)
             if send_cb:
                 await send_cb(
@@ -430,6 +435,7 @@ class BountyController:
             st.pending_action = ""
             st.retry_count = 0
             st.settle_at_ts = time.time() + self.retry_when_running_sec
+            st.last_action_ts = time.time()
             await self._set(key, st)
             if send_cb:
                 await send_cb(f"⏳ 悬赏仍在进行中，将于 {fmt_ts(st.settle_at_ts)} 再次尝试结算。")
@@ -461,6 +467,7 @@ class BountyController:
             st.pending_action = "settle"
             st.retry_count = 0
             st.settle_at_ts = 0.0
+            st.last_action_ts = now
             await self._set(key, st)
             await send_cb(f"@{self.official_qq} 悬赏令结算")
             return
@@ -471,6 +478,7 @@ class BountyController:
             st.pending_action = legacy_actions[st.phase]
             st.phase = f"WAITING_{st.pending_action.upper()}"
             st.retry_count = 0
+            st.last_action_ts = now
             await self._set(key, st)
 
         if st.phase.startswith("WAITING_") and st.pending_action and st.last_action_ts and now - st.last_action_ts > self.response_timeout_sec:
