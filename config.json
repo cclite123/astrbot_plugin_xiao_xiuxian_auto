@@ -222,5 +222,35 @@
     "challenge_timeout_sec": 60.0,
     "_comment_max_failures": "连续超时或解析失败多少次后停止。",
     "max_failures": 3
+  },
+  "daily_dual": {
+    "enabled": true,
+    "schedule_time": "08:20",
+    "response_timeout_sec": 15,
+    "query_max_retries": 3,
+    "action_delay_sec": 2
+  },
+  "linjie_mining": {
+    "enabled": true,
+    "schedule_time": "08:10",
+    "response_timeout_sec": 15,
+    "extra_wait_sec": 10,
+    "action_delay_sec": 2
+  },
+  "group_reminder": {
+    "enabled": true,
+    "listing_dedupe_sec": 21600
+  },
+  "affinity_purchase": {
+    "enabled": true,
+    "query_timeout_sec": 20,
+    "purchase_timeout_sec": 20,
+    "action_delay_sec": 1
+  },
+  "market_sync": {
+    "enabled": true,
+    "response_timeout_sec": 20,
+    "max_retries": 2,
+    "page_delay_sec": 1
   }
 }

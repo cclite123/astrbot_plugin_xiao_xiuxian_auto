@@ -279,6 +279,57 @@ class MarketPriceProvider:
                     best = price
         return best
 
+    async def merge_observed_prices(
+        self,
+        prices: Dict[str, int],
+        *,
+        source: str = "坊市页面观察",
+        replace_names: Optional[set[str]] = None,
+    ) -> int:
+        """Merge trusted page observations and persist them in the existing cache.
+
+        ``replace_names`` is used by a completed category sync: names previously
+        belonging to that category can be replaced atomically after every page has
+        been collected. Passive single-page observations simply update the seen
+        names and keep all other cached quotes.
+        """
+        if not self.enabled:
+            return 0
+        normalized: Dict[str, int] = {}
+        for raw_name, raw_price in dict(prices or {}).items():
+            name = self.normalize_name(raw_name)
+            try:
+                price = int(raw_price)
+            except Exception:
+                continue
+            if name and price > 0:
+                old = normalized.get(name)
+                normalized[name] = price if old is None else min(old, price)
+        if not normalized:
+            return 0
+        async with self._lock:
+            now = time.time()
+            if replace_names:
+                for name in replace_names:
+                    self._items.pop(self.normalize_name(name), None)
+            for name, price in normalized.items():
+                self._items[name] = {
+                    "price": price,
+                    "updated_at": now,
+                    "source": str(source),
+                    "unit": "灵石",
+                }
+            self._loaded_from = str(source)
+            self._last_error = ""
+            if self.local_path:
+                payload = {"updated_at": now, "unit": "灵石", "items": self._items}
+                await asyncio.to_thread(self._atomic_write_json, self.local_path, payload)
+                try:
+                    self._local_mtime = os.path.getmtime(self.local_path)
+                except Exception:
+                    pass
+        return len(normalized)
+
     async def summary(self) -> str:
         await self.refresh(force=False)
         if not self.enabled:

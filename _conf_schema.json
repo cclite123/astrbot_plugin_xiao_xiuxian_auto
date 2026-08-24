@@ -511,5 +511,55 @@
         "default": 3
       }
     }
+  },
+  "daily_dual": {
+    "description": "每日双修模块",
+    "type": "object",
+    "items": {
+      "enabled": {"description": "总开关", "type": "bool", "default": true},
+      "schedule_time": {"description": "执行时间", "type": "string", "default": "08:20"},
+      "response_timeout_sec": {"description": "回执超时（秒）", "type": "float", "default": 15},
+      "query_max_retries": {"description": "次数查询最大重试", "type": "int", "default": 3},
+      "action_delay_sec": {"description": "动作间隔（秒）", "type": "float", "default": 2}
+    }
+  },
+  "linjie_mining": {
+    "description": "灵界挖矿模块",
+    "type": "object",
+    "items": {
+      "enabled": {"description": "总开关", "type": "bool", "default": true},
+      "schedule_time": {"description": "执行时间", "type": "string", "default": "08:10"},
+      "response_timeout_sec": {"description": "回执超时（秒）", "type": "float", "default": 15},
+      "extra_wait_sec": {"description": "挖矿时长额外等待（秒）", "type": "float", "default": 10},
+      "action_delay_sec": {"description": "动作间隔（秒）", "type": "float", "default": 2}
+    }
+  },
+  "group_reminder": {
+    "description": "独立提醒群模块",
+    "type": "object",
+    "items": {
+      "enabled": {"description": "总开关", "type": "bool", "default": true},
+      "listing_dedupe_sec": {"description": "坊市摊位去重时间（秒）", "type": "int", "default": 21600}
+    }
+  },
+  "affinity_purchase": {
+    "description": "结缘物品监听与安全购买",
+    "type": "object",
+    "items": {
+      "enabled": {"description": "总开关", "type": "bool", "default": true},
+      "query_timeout_sec": {"description": "复查超时（秒）", "type": "float", "default": 20},
+      "purchase_timeout_sec": {"description": "购买回执超时（秒）", "type": "float", "default": 20},
+      "action_delay_sec": {"description": "动作间隔（秒）", "type": "float", "default": 1}
+    }
+  },
+  "market_sync": {
+    "description": "坊市分类价格同步",
+    "type": "object",
+    "items": {
+      "enabled": {"description": "总开关", "type": "bool", "default": true},
+      "response_timeout_sec": {"description": "页面回执超时（秒）", "type": "float", "default": 20},
+      "max_retries": {"description": "页面最大重试", "type": "int", "default": 2},
+      "page_delay_sec": {"description": "页面间隔（秒）", "type": "float", "default": 1}
+    }
   }
 }

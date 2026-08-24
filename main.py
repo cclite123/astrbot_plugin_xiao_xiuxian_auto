@@ -41,6 +41,12 @@ try:
     from .linjie import LinjieUpgradeController, format_money as format_linjie_money
     from .endless import EndlessTowerController
     from .captcha_guard import CaptchaGuard, is_click_action_accepted
+    from .automation_safety import SideEffectGuard
+    from .daily_dual import DailyDualController
+    from .linjie_mining import LinjieMiningController
+    from .group_reminder import GroupReminderController
+    from .affinity_purchase import AffinityPurchaseController
+    from .market_automation import MarketAutomationController
     from .protocol_compat import (
         build_llbot_inline_keyboard_click,
         event_field,
@@ -64,6 +70,12 @@ except ImportError:
     from linjie import LinjieUpgradeController, format_money as format_linjie_money
     from endless import EndlessTowerController
     from captcha_guard import CaptchaGuard, is_click_action_accepted
+    from automation_safety import SideEffectGuard
+    from daily_dual import DailyDualController
+    from linjie_mining import LinjieMiningController
+    from group_reminder import GroupReminderController
+    from affinity_purchase import AffinityPurchaseController
+    from market_automation import MarketAutomationController
     from protocol_compat import (
         build_llbot_inline_keyboard_click,
         event_field,
@@ -573,6 +585,7 @@ class XiaoXiuxianAuto(Star):
         self.cfg = _deep_merge_dict(_load_local_config(), self._astrbot_config or {})
         self.cfg = _deep_merge_dict(self.cfg, _load_page_override())
         self._captcha_guards: Dict[str, CaptchaGuard] = {}
+        self.safety_guard = SideEffectGuard(self.store, logger=logger)
 
         self.multi_cfg = dict(self.cfg.get("multi_account", {}) or {})
         self.multi_account_enabled = bool(self.multi_cfg.get("enabled", True))
@@ -653,6 +666,7 @@ class XiaoXiuxianAuto(Star):
             config=inv_cfg,
             runtime_path=os.path.join(self.data_dir, "inventory_ops_runtime_config.json"),
             logger=logger,
+            side_effect_guard=getattr(self, "safety_guard", None),
         )
 
         auto_alchemy_cfg = dict(self.cfg.get("auto_alchemy", {}) or {})
@@ -682,6 +696,17 @@ class XiaoXiuxianAuto(Star):
             config=endless_cfg,
             logger=logger,
         )
+        extended_cfg = dict(self.cfg.get("extended_tasks", {}) or {})
+        dual_cfg = dict(self.cfg.get("daily_dual", extended_cfg.get("daily_dual", {})) or {})
+        mining_cfg = dict(self.cfg.get("linjie_mining", extended_cfg.get("linjie_mining", {})) or {})
+        reminder_cfg = dict(self.cfg.get("group_reminder", extended_cfg.get("group_reminder", {})) or {})
+        affinity_cfg = dict(self.cfg.get("affinity_purchase", extended_cfg.get("affinity_purchase", {})) or {})
+        market_sync_cfg = dict(self.cfg.get("market_sync", extended_cfg.get("market_sync", {})) or {})
+        self.daily_dual = DailyDualController(self.store, self.safety_guard, dual_cfg, logger=logger)
+        self.linjie_mining = LinjieMiningController(self.store, self.safety_guard, mining_cfg, logger=logger)
+        self.group_reminder = GroupReminderController(self.store, reminder_cfg, logger=logger)
+        self.affinity_purchase = AffinityPurchaseController(self.store, self.safety_guard, affinity_cfg, logger=logger)
+        self.market_sync = MarketAutomationController(self.store, self.market_price, market_sync_cfg, logger=logger)
         logger.info(
             "[xiao_xiuxian_auto] 炼丹配置：batch_alchemy_command_count=%s, refresh_pages_each_buy_round=%s",
             self.auto_alchemy.batch_alchemy_command_count,
@@ -720,7 +745,8 @@ class XiaoXiuxianAuto(Star):
         self._account_controllers: Dict[str, Dict[str, Any]] = {}
         for name in (
             "bounty", "secret", "routine", "sect", "cultivate",
-            "inventory_ops", "auto_alchemy", "linjie", "endless",
+            "inventory_ops", "auto_alchemy", "linjie", "endless", "daily_dual",
+            "linjie_mining", "group_reminder", "affinity_purchase", "market_sync",
         ):
             setattr(self, name, _AccountControllerProxy(self, name, getattr(self, name)))
 
@@ -810,6 +836,7 @@ class XiaoXiuxianAuto(Star):
             config=dict(cfg.get("inventory_ops", {}) or {}),
             runtime_path=inventory_runtime,
             logger=logger,
+            side_effect_guard=getattr(self, "safety_guard", None),
         )
 
         herb_prices_path = os.path.join(account_dir, "herb_max_prices.yaml")
@@ -846,7 +873,7 @@ class XiaoXiuxianAuto(Star):
             config=dict(cfg.get("endless_tower", {}) or {}),
             logger=logger,
         )
-        return {
+        controllers = {
             "bounty": bounty,
             "secret": secret,
             "routine": routine,
@@ -856,7 +883,18 @@ class XiaoXiuxianAuto(Star):
             "auto_alchemy": auto_alchemy,
             "linjie": linjie,
             "endless": endless,
+            # Extended modules key their state by account/group and are safe to
+            # share across account controller maps.
         }
+        # Test doubles and older embedding hosts may construct the plugin before
+        # optional migrated modules are initialized; keep their legacy map valid.
+        for name in ("daily_dual", "linjie_mining", "group_reminder", "affinity_purchase", "market_sync"):
+            controller = getattr(self, name, None)
+            if isinstance(controller, _AccountControllerProxy):
+                controller = controller._default
+            if controller is not None:
+                controllers[name] = controller
+        return controllers
 
     def _controller(self, name: str, key: str):
         sid = self._self_id_from_key(key)
@@ -1610,6 +1648,15 @@ class XiaoXiuxianAuto(Star):
                     self._known_keys.add(bound_key)
                     send_cb = self._make_send_cb(bound_key)
                     if send_cb is not None:
+                        await self._controller("daily_dual", bound_key).tick(bound_key, send_cb)
+                        await self._controller("linjie_mining", bound_key).tick(bound_key, send_cb)
+                        await self._controller("affinity_purchase", bound_key).tick(bound_key, send_cb)
+                        await self._controller("market_sync", bound_key).tick(bound_key, send_cb)
+                        async def _send_reminder(group_id, text, _sid=self_id):
+                            target = self._make_send_cb(f"{_sid}:{group_id}")
+                            if target is not None:
+                                await target(text)
+                        await self._controller("group_reminder", bound_key).tick(bound_key, _send_reminder)
                         await self._controller("bounty", bound_key).tick(bound_key, send_cb)
                         await self._controller("secret", bound_key).tick(bound_key, send_cb)
                         await self._controller("routine", bound_key).tick(bound_key, send_cb)
@@ -1674,6 +1721,10 @@ class XiaoXiuxianAuto(Star):
         cult_st = await self._controller("cultivate", key)._get(key)
         linjie_st = await linjie._get(key)
         endless_st = await self._controller("endless", key)._get(key)
+        dual_st = await self._controller("daily_dual", key)._get(key)
+        mining_st = await self._controller("linjie_mining", key)._get(key)
+        affinity_st = await self._controller("affinity_purchase", key)._get(key)
+        market_sync_st = await self._controller("market_sync", key)._get(key)
 
         bounty_next = "已关闭"
         if bounty_st.enabled:
@@ -1737,6 +1788,10 @@ class XiaoXiuxianAuto(Star):
                 f"⛏️ 挖灵石：{routine_line('挖灵石', routine_st.mine_enabled, routine_st.mine_phase, routine_st.mine_action_ts, routine_st.mine_wake_ts).split('：',1)[1]}\n"
                 f"🌾 灵田：{routine_line('灵田', routine_st.farm_enabled, routine_st.farm_phase, routine_st.farm_action_ts, routine_st.farm_wake_ts).split('：',1)[1]}\n"
                 f"🏔️ 灵界升级：{linjie.summary_line(linjie_st)}\n"
+                f"👥 双修：{'✅' if dual_st.enabled else '🛑'} {dual_st.phase}（{dual_st.dao_name or '未设置'}）\n"
+                f"⛏️ 灵界挖矿：{'✅' if mining_st.enabled else '🛑'} {mining_st.phase}，今日 {mining_st.mined_count} 次\n"
+                f"💞 结缘：{'✅' if affinity_st.enabled else '🛑'} {affinity_st.phase}（{affinity_st.target_item or '未设置'}）\n"
+                f"🏪 坊市同步：{market_sync_st.phase}\n"
                 f"🗼 无尽妖塔：{endless_next}，进度 {endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'}\n"
                 f"🧩 验证码守卫：{captcha_next}\n"
                 f"🧘 修炼/闭关：{cult_next}")
@@ -1767,6 +1822,10 @@ class XiaoXiuxianAuto(Star):
                     f"🔹 [物品]：一键上架 / 一键炼金\n"
                     f"🔹 [炼丹]：开启炼丹 / 开启背包炼丹 / 开启购买药材 / 开启动态购买 / 指定丹药 丹药 数量 / 关闭炼丹\n"
                     f"🔹 [灵界]：{'✅开启' if linjie_st.enabled else '🛑关闭'} | {linjie.summary_line(linjie_st)}\n"
+                    f"🔹 [双修]：双修道号 xxx / 开启双修 / 双修状态\n"
+                    f"🔹 [灵界挖矿]：开启灵界挖矿 / 关闭灵界挖矿\n"
+                    f"🔹 [提醒]：绑定提醒群 / 开启提醒 / 提醒状态\n"
+                    f"🔹 [结缘]：结缘物品 xxx / 开启结缘 / 结缘状态\n"
                     f"🔹 [无尽]：{'✅开启' if endless_st.enabled else '🛑关闭'} | 进度:{endless_st.done_count}/{endless_st.target_count if endless_st.target_count > 0 else '无限'} 真元检测:{'✅' if endless_st.check_mp_enabled else '🛑'}({endless_st.mp_threshold}%)\n"
                     f"🔹 [坊市]：刷新坊市价格 / 更新坊市价格\n"
                     f"🔹 [休息]：{cult_st.mode or '未设置'} ({'休息中' if cult_st.is_resting else '活动中'}) | 气血:{cult_st.hp_percent:.1f}%\n\n"
@@ -1779,6 +1838,9 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 修仙菜单 物品\n"
                     f"▶ 修仙菜单 炼丹\n"
                     f"▶ 修仙菜单 灵界\n"
+                    f"▶ 修仙菜单 双修\n"
+                    f"▶ 修仙菜单 提醒\n"
+                    f"▶ 修仙菜单 坊市\n"
                     f"▶ 修仙菜单 无尽\n"
                     f"▶ 修仙菜单 系统\n"
                     f"▶ 任务状态 / 修仙状态")
@@ -1871,6 +1933,7 @@ class XiaoXiuxianAuto(Star):
                     "开启背包炼丹只使用背包药材，不做坊市购买，会持续炼制材料完整且利润不低于配置阈值的丹方。")
 
         elif sub_menu == "灵界":
+            mining_st = await self._controller("linjie_mining", key)._get(key)
             return (f"📜 【灵界升级模块】指令说明 📜\n"
                     f"当前状态：{'✅开启' if linjie_st.enabled else '🛑关闭'}\n"
                     f"运行阶段：{linjie.summary_line(linjie_st)}\n"
@@ -1881,7 +1944,10 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 灵界刷新规划\n"
                     f"▶ 灵界规划详情\n"
                     f"▶ 灵界规划序列\n"
-                    f"▶ 灵界状态\n"
+                    f"▶ 灵界状态\n\n"
+                    f"⛏️ 灵界挖矿：{'✅开启' if mining_st.enabled else '🛑关闭'}，今日 {mining_st.mined_count} 次\n"
+                    f"▶ 开启灵界挖矿 / 关闭灵界挖矿\n"
+                    f"▶ 灵界挖矿状态\n"
                     f"说明：启动时集中查询灵界信息，后续按成功回执更新缓存，按 ROI 性价比选择下一项。")
 
         elif sub_menu == "无尽":
@@ -1896,6 +1962,25 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 开启真元检测 / 关闭真元检测\n"
                     f"▶ 设置真元检测 600\n"
                     f"▶ 无尽状态")
+
+        elif sub_menu == "双修":
+            dual_st = await self._controller("daily_dual", key)._get(key)
+            return ("📜 【双修模块】指令说明 📜\n"
+                    f"状态：{'✅开启' if dual_st.enabled else '🛑关闭'}，道号：{dual_st.dao_name or '未设置'}\n"
+                    "▶ 双修道号 道号\n▶ 开启双修 / 关闭双修\n▶ 双修状态 / 重置双修状态")
+
+        elif sub_menu == "提醒":
+            return ("📜 【提醒群模块】指令说明 📜\n"
+                    "▶ 绑定提醒群 / 解绑提醒群 / 提醒群列表\n"
+                    "▶ 开启提醒 / 关闭提醒 / 提醒状态\n"
+                    "▶ 开启结算提醒 / 关闭结算提醒\n"
+                    "▶ 开启坊市提醒 / 关闭坊市提醒\n"
+                    "▶ 增加提醒物品 物品名 / 删除提醒物品 物品名")
+
+        elif sub_menu == "坊市":
+            return ("📜 【坊市同步模块】指令说明 📜\n"
+                    "▶ 同步坊市价格 药材|装备|技能|道具|全部\n"
+                    "▶ 坊市同步状态\n▶ 查询坊市价格 药材 1")
 
         elif sub_menu == "系统":
             return (f"📜 【系统模块】指令说明 📜\n"
@@ -1912,7 +1997,7 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 修仙菜单")
 
         else:
-            return "❌ 未知的子目录，请输入：悬赏、秘境、宗门、日常、修炼、物品、炼丹、灵界、无尽、系统"
+            return "❌ 未知的子目录，请输入：悬赏、秘境、宗门、日常、修炼、物品、炼丹、灵界、双修、提醒、坊市、无尽、系统"
 
     def _make_send_cb(self, key: str):
 
@@ -1959,6 +2044,86 @@ class XiaoXiuxianAuto(Star):
 
         return _send
 
+    async def _handle_extended_control(self, key: str, text: str, send_cb) -> tuple[bool, str]:
+        """Dispatch migrated modules shared by both native and AstrBot inputs."""
+        text = str(text or "").strip()
+        dual = self._controller("daily_dual", key)
+        mining = self._controller("linjie_mining", key)
+        reminder = self._controller("group_reminder", key)
+        affinity = self._controller("affinity_purchase", key)
+        market_sync = self._controller("market_sync", key)
+        if text.startswith(("双修道号", "设置双修道号")):
+            prefix = "设置双修道号" if text.startswith("设置双修道号") else "双修道号"
+            return True, await dual.cmd_set_dao_name(key, text.replace(prefix, "", 1).strip())
+        if text == "开启双修": return True, await dual.cmd_enable(key, send_cb)
+        if text == "关闭双修": return True, await dual.cmd_disable(key)
+        if text == "双修状态": return True, await dual.cmd_status(key)
+        if text == "重置双修状态": return True, await dual.cmd_reset(key)
+        if text == "开启灵界挖矿": return True, await mining.cmd_enable(key, send_cb)
+        if text == "关闭灵界挖矿": return True, await mining.cmd_disable(key)
+        if text == "灵界挖矿状态": return True, await mining.cmd_status(key)
+        if text == "重置灵界挖矿状态": return True, await mining.cmd_reset(key)
+        if text == "绑定提醒群": return True, await reminder.cmd_bind(key)
+        if text == "解绑提醒群": return True, await reminder.cmd_unbind(key)
+        if text == "提醒群列表": return True, await reminder.cmd_list(key)
+        if text == "开启提醒": return True, await reminder.cmd_enable_all(key)
+        if text == "关闭提醒": return True, await reminder.cmd_disable_all(key)
+        if text == "提醒状态": return True, await reminder.cmd_status(key)
+        if text == "开启结算提醒": return True, await reminder.cmd_enable_settlement(key)
+        if text == "关闭结算提醒": return True, await reminder.cmd_disable_settlement(key)
+        if text == "开启坊市提醒": return True, await reminder.cmd_enable_market(key)
+        if text == "关闭坊市提醒": return True, await reminder.cmd_disable_market(key)
+        if text.startswith("增加提醒物品"):
+            return True, await reminder.cmd_watch(key, text.replace("增加提醒物品", "", 1), True)
+        if text.startswith("删除提醒物品"):
+            return True, await reminder.cmd_watch(key, text.replace("删除提醒物品", "", 1), False)
+        if text == "重置提醒物品": return True, await reminder.cmd_reset_watch(key)
+        if text.startswith("预览一键上架"):
+            return True, await self._controller("inventory_ops", key).cmd_preview_market(
+                key, text.replace("预览一键上架", "", 1).strip(), send_cb
+            )
+        if text.startswith("预览一键炼金"):
+            return True, await self._controller("inventory_ops", key).cmd_preview_alchemy(
+                key, text.replace("预览一键炼金", "", 1).strip(), send_cb
+            )
+        if text == "确认一键上架" or text == "确认一键炼金":
+            return True, await self._controller("inventory_ops", key).cmd_confirm(key, send_cb)
+        if text == "重置一键任务":
+            return True, await self._controller("inventory_ops", key).cmd_reset(key)
+        if text.startswith("结缘物品"):
+            return True, await affinity.cmd_set_target(key, text.replace("结缘物品", "", 1))
+        if text == "开启结缘": return True, await affinity.cmd_enable(key, send_cb)
+        if text == "关闭结缘": return True, await affinity.cmd_disable(key)
+        if text == "结缘状态": return True, await affinity.cmd_status(key)
+        if text == "重置结缘状态": return True, await affinity.cmd_reset(key)
+        if text.startswith("同步坊市价格"):
+            category = text.replace("同步坊市价格", "", 1).strip() or "全部"
+            return True, await market_sync.cmd_sync(key, category)
+        if text == "坊市同步状态": return True, await market_sync.cmd_status(key)
+        if text in {"执行状态", "执行状态 基础", "执行状态 日常", "执行状态 修炼", "执行状态 双修", "执行状态 坊市"}:
+            if text.endswith("双修"): return True, await dual.cmd_status(key)
+            if text.endswith("坊市"): return True, await market_sync.cmd_status(key)
+            return True, await self.cmd_task_status(key)
+        if text.startswith("重置模块"):
+            module = text.replace("重置模块", "", 1).strip()
+            resetters = {
+                "双修": dual.cmd_reset,
+                "灵界挖矿": mining.cmd_reset,
+                "结缘": affinity.cmd_reset,
+                "坊市": market_sync.cmd_reset,
+                "一键任务": self._controller("inventory_ops", key).cmd_reset,
+            }
+            resetter = resetters.get(module)
+            if resetter is None:
+                return True, "❌ 可重置模块：双修、灵界挖矿、结缘、一键任务"
+            return True, await resetter(key)
+        if text.startswith("查询坊市价格"):
+            parts = text.split()
+            category = parts[1] if len(parts) > 1 else "药材"
+            page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+            return True, await market_sync.cmd_query(key, category, page)
+        return False, ""
+
 
 
 
@@ -1987,10 +2152,16 @@ class XiaoXiuxianAuto(Star):
             "挑战无尽妖塔",
             "灵界我的信息", "灵界建筑列表", "灵界升级列表", "灵界杂役名录",
             "灵界技艺修行", "灵界技艺突破", "灵界杂役升阶", "灵界挖灵石",
+            "我的双修次数",
+            "开启双修", "关闭双修", "双修状态", "重置双修状态",
+            "开启灵界挖矿", "关闭灵界挖矿", "灵界挖矿状态", "重置灵界挖矿状态",
+            "绑定提醒群", "解绑提醒群", "提醒群列表", "开启提醒", "关闭提醒",
+            "提醒状态", "开启结算提醒", "关闭结算提醒", "开启坊市提醒", "关闭坊市提醒",
+            "重置提醒物品", "坊市同步状态", "重置结缘状态",
         }
         if text in exact_commands:
             return True
-        return bool(re.fullmatch(r"悬赏令接取\d+|药材背包\d*|丹药背包\d*|我的背包\d*|确认坊市上架\s+.+?\s+\d+\s+\d+|炼金\s+.+?\s+\d+|灵界建造.+?\s+\d+|灵界招募.+?\s+\d+|灵界升级建筑.+", text))
+        return bool(re.fullmatch(r"悬赏令接取\d+|药材背包\d*|丹药背包\d*|我的背包\d*|确认坊市上架\s+.+?\s+\d+\s+\d+|炼金\s+.+?\s+\d+|坊市查看(?:药材|装备|技能|道具)\d*|坊市购买.+|灵界建造.+?\s+\d+|灵界招募.+?\s+\d+|灵界升级建筑.+|双修\s+.+|双修道号\s+.+|设置双修道号\s+.+|结缘物品\s+.+|增加提醒物品\s+.+|删除提醒物品\s+.+|同步坊市价格(?:\s+(?:药材|装备|技能|道具|全部))?|查询(?:普通|药材|丹药)上架价格|预览一键(?:上架|炼金)(?:\s+.+)?|确认一键(?:上架|炼金)|重置一键任务|重置模块\s+.+|执行状态(?:\s+.+)?", text))
 
     def _activity_module_of(self, text: str) -> Optional[str]:
 
@@ -2820,8 +2991,9 @@ class XiaoXiuxianAuto(Star):
             self._known_keys.add(key)
             send_cb = self._make_send_cb(key)
             reply = ""
+            _extended_handled, reply = await self._handle_extended_control(key, text, send_cb)
 
-            if text == "开启悬赏": reply = await self.bounty.cmd_enable(key, send_cb)
+            if not reply and text == "开启悬赏": reply = await self.bounty.cmd_enable(key, send_cb)
             elif text == "关闭悬赏": reply = await self.bounty.cmd_disable(key)
             elif text == "开启秘境": reply = await self.secret.cmd_enable(key, send_cb)
             elif text == "关闭秘境": reply = await self.secret.cmd_disable(key)
@@ -2954,6 +3126,16 @@ class XiaoXiuxianAuto(Star):
             raw_text = extract_raw_text(event) or text
             if not text and not raw_text: return
             if not self._claim_official_event(event, self_id, group_id, raw_text or text): return
+            message_id = str(event_field(event, "message_id") or event_field(event, "id") or "")
+            # Passive market/affinity listeners are intentionally allowed to see
+            # unbound groups; they never send a command from the observing group.
+            try:
+                observed_page = self.market_sync.parser.parse(raw_text)
+                if observed_page is not None:
+                    await self.group_reminder.observe_market(self_id, observed_page)
+                    await self.affinity_purchase.observe_any_group(self_id, str(group_id or ""), raw_text)
+            except Exception as exc:
+                logger.debug(f"[xiao_xiuxian_auto] 被动坊市观察失败: {exc}")
             if not await self._is_bound_match(self_id, group_id): return
 
             key = f"{self_id}:{group_id}"
@@ -2962,6 +3144,11 @@ class XiaoXiuxianAuto(Star):
 
             if await self._handle_captcha(key, event, raw_text):
                 return
+
+            await self._controller("daily_dual", key).on_official_text(key, raw_text, send_cb, message_id)
+            await self._controller("linjie_mining", key).on_official_text(key, raw_text, send_cb, message_id)
+            await self._controller("affinity_purchase", key).on_official_text(key, raw_text, send_cb)
+            await self._controller("market_sync", key).observe_page(key, raw_text)
 
             handled_auto_alchemy = await self.auto_alchemy.on_official_text(key, raw_text, send_cb)
             handled_inventory = False
@@ -2975,6 +3162,23 @@ class XiaoXiuxianAuto(Star):
                 await self.cultivate.on_official_text(key, text, send_cb)
                 await self.linjie.on_official_text(key, text, send_cb)
                 await self.endless.on_official_text(key, text, send_cb)
+
+            # Record activity start times for independent reminder groups. The
+            # reminder controller deduplicates signatures, so this is safe on
+            # both native and AstrBot event paths.
+            try:
+                bounty_state = await self._controller("bounty", key)._get(key)
+                secret_state = await self._controller("secret", key)._get(key)
+                if bounty_state.settle_at_ts:
+                    await self._controller("group_reminder", key).observe_activity(
+                        key, "bounty", bounty_state.settle_at_ts
+                    )
+                if secret_state.settle_at_ts:
+                    await self._controller("group_reminder", key).observe_activity(
+                        key, "secret", secret_state.settle_at_ts
+                    )
+            except Exception as exc:
+                logger.debug(f"[xiao_xiuxian_auto] 记录提醒排程失败: {exc}")
 
             await self._handle_seclusion_guard_text(key, text)
 
@@ -3001,7 +3205,7 @@ class XiaoXiuxianAuto(Star):
         gid = getattr(event.message_obj, "group_id", None)
         return f"{sid}:{gid}" if gid else f"{sid}:private:{event.get_sender_id()}"
 
-    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启悬赏|关闭悬赏|悬赏(修为|价值|耗时)|统计|开启秘境|关闭秘境|开启签到|关闭签到|开启领丹|关闭领丹|开启挖矿|关闭挖矿|开启灵田|关闭灵田|开启宗门任务|关闭宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启修炼|关闭修炼|开启闭关|关闭闭关|开启宗门闭关|关闭宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启炼丹|开启背包炼丹|指定丹药 .+|关闭炼丹|炼丹状态|开启购买药材(?:\s+\d+)?|关闭购买药材|开启动态购买|关闭动态购买|开启灵界升级|关闭灵界升级|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|灵界规划序列|开启真元检测|关闭真元检测|设置真元检测.*|开启无尽(?:\s+\d+)?|关闭无尽|无尽状态|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|继续任务|验证码状态|任务状态|修仙状态|修仙菜单.*)$")
+    @filter.regex(r"^(绑定此群|更改绑定|解绑此群|绑定列表|账号配置|多账号状态|开启悬赏|关闭悬赏|悬赏(修为|价值|耗时)|统计|开启秘境|关闭秘境|开启签到|关闭签到|开启领丹|关闭领丹|开启挖矿|关闭挖矿|开启灵田|关闭灵田|开启宗门任务|关闭宗门任务|宗门任务状态|宗门任务接取|宗门任务时间.*|开启宗门任务.*|关闭宗门任务.*|开启修炼|关闭修炼|开启闭关|关闭闭关|开启宗门闭关|关闭宗门闭关|查询气血|坊市价格状态|价格状态|坊市状态|价格中心状态|计算中心状态|刷新坊市价格|更新坊市价格|刷新价格中心|刷新计算中心|开启价格中心|关闭价格中心|开启计算中心|关闭计算中心|开启坊市价格|关闭坊市价格|默认价格中心|重置价格中心|恢复默认价格中心|默认计算中心|重置计算中心|设置价格中心地址.*|设置计算中心地址.*|设置坊市价格地址.*|设置价格中心密钥.*|设置计算中心密钥.*|开启炼丹|开启背包炼丹|指定丹药 .+|关闭炼丹|炼丹状态|开启购买药材(?:\s+\d+)?|关闭购买药材|开启动态购买|关闭动态购买|开启灵界升级|关闭灵界升级|灵界状态|灵界规划|灵界刷新规划|灵界规划详情|灵界规划序列|开启真元检测|关闭真元检测|设置真元检测.*|开启无尽(?:\s+\d+)?|关闭无尽|无尽状态|一键上架(药材|装备|神物|丹药)|一键炼金(药材|装备|神物|丹药)|炼金名单|炼金白名单|炼金黑名单|添加炼金白名单.*|删除炼金白名单.*|添加炼金黑名单.*|删除炼金黑名单.*|双修道号.*|设置双修道号.*|开启双修|关闭双修|双修状态|重置双修状态|开启灵界挖矿|关闭灵界挖矿|灵界挖矿状态|重置灵界挖矿状态|绑定提醒群|解绑提醒群|提醒群列表|开启提醒|关闭提醒|提醒状态|开启结算提醒|关闭结算提醒|开启坊市提醒|关闭坊市提醒|增加提醒物品.*|删除提醒物品.*|重置提醒物品|结缘物品.*|开启结缘|关闭结缘|结缘状态|重置结缘状态|同步坊市价格.*|坊市同步状态|查询坊市价格.*|继续任务|验证码状态|任务状态|修仙状态|修仙菜单.*)$")
     async def on_self_command(self, event: AstrMessageEvent):
 
 
@@ -3048,8 +3252,9 @@ class XiaoXiuxianAuto(Star):
         self._known_keys.add(key)
         send_cb = self._make_send_cb(key)
         reply = ""
+        _extended_handled, reply = await self._handle_extended_control(key, text, send_cb)
 
-        if text == "开启悬赏": reply = await self.bounty.cmd_enable(key, send_cb)
+        if not reply and text == "开启悬赏": reply = await self.bounty.cmd_enable(key, send_cb)
         elif text == "关闭悬赏": reply = await self.bounty.cmd_disable(key)
         elif text == "开启秘境": reply = await self.secret.cmd_enable(key, send_cb)
         elif text == "关闭秘境": reply = await self.secret.cmd_disable(key)

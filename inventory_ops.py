@@ -22,7 +22,8 @@ CATEGORY_PILL = "丹药"
 CATEGORY_EQUIP = "装备"
 CATEGORY_ARTIFACT = "神物"
 CATEGORY_PROP = "道具"
-SUPPORTED_CATEGORIES = {CATEGORY_HERB, CATEGORY_PILL, CATEGORY_EQUIP, CATEGORY_ARTIFACT}
+CATEGORY_GENERAL = "普通"
+SUPPORTED_CATEGORIES = {CATEGORY_GENERAL, CATEGORY_HERB, CATEGORY_PILL, CATEGORY_EQUIP, CATEGORY_ARTIFACT}
 
 
 @dataclass
@@ -51,6 +52,9 @@ class InventoryJob:
     updated_at: float = field(default_factory=time.time)
     last_command_ts: float = 0.0
     stats: Dict[str, Any] = field(default_factory=dict)
+    preview_only: bool = False
+    confirm_pending: bool = False
+    preview_fingerprint: str = ""
 
 
 class InventoryOpsController:
@@ -68,10 +72,12 @@ class InventoryOpsController:
     )
 
     def __init__(self, *, official_qq: str, market_price: Optional[MarketPriceProvider] = None,
-                 config: Optional[dict] = None, runtime_path: str = "", logger=None):
+                 config: Optional[dict] = None, runtime_path: str = "", logger=None,
+                 side_effect_guard=None):
         self.official_qq = str(official_qq)
         self.market_price = market_price
         self.log = logger
+        self.side_effect_guard = side_effect_guard
         self.runtime_path = str(runtime_path or "").strip()
         cfg = dict(config or {})
 
@@ -122,6 +128,7 @@ class InventoryOpsController:
 
         self.jobs: Dict[str, InventoryJob] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
+        self.preview_plans: Dict[str, InventoryJob] = {}
 
 
     def _info(self, msg: str) -> None:
@@ -268,6 +275,8 @@ class InventoryOpsController:
     def _normalize_category(category: str) -> str:
         category = str(category or "").strip()
         alias = {
+            "普通": CATEGORY_GENERAL,
+            "一般": CATEGORY_GENERAL,
             "药材": CATEGORY_HERB,
             "丹药": CATEGORY_PILL,
             "装备": CATEGORY_EQUIP,
@@ -301,12 +310,45 @@ class InventoryOpsController:
     async def cmd_start_alchemy(self, key: str, category: str, send_cb) -> str:
         return await self._start_job(key, "alchemy", category, send_cb)
 
-    async def _start_job(self, key: str, op: str, category: str, send_cb) -> str:
+    async def cmd_preview_market(self, key: str, category: str, send_cb) -> str:
+        return await self._start_job(key, "market", category, send_cb, preview_only=True)
+
+    async def cmd_preview_alchemy(self, key: str, category: str, send_cb) -> str:
+        return await self._start_job(key, "alchemy", category, send_cb, preview_only=True)
+
+    async def cmd_confirm(self, key: str, send_cb) -> str:
+        job = self.preview_plans.get(key)
+        if not job or job.phase != "PREVIEW_READY":
+            return "❌ 当前没有可确认的预览计划，请先发送预览一键上架/预览一键炼金。"
+        # Re-collect the inventory and rebuild the plan.  A plan is executable only
+        # when the second snapshot has the same fingerprint as the preview.
+        job.phase = "COLLECTING"
+        job.preview_only = False
+        job.confirm_pending = True
+        job.current_page = 1
+        job.total_pages = 1
+        job.items.clear()
+        job.plan.clear()
+        job.current = None
+        job.stats = self._init_stats(job.op, job.category)
+        self.jobs[key] = job
+        await send_cb(f"@{self.official_qq} {self._bag_command(job.category, 1)}")
+        job.last_command_ts = job.updated_at = time.time()
+        return "✅ 已确认预览，正在重新读取背包并校验计划；库存或价格变化将自动取消执行。"
+
+    async def cmd_reset(self, key: str) -> str:
+        job = self.jobs.pop(key, None)
+        self.preview_plans.pop(key, None)
+        if self.side_effect_guard:
+            await self.side_effect_guard.reset_module(key, "inventory_ops")
+        return "✅ 一键上架/炼金执行状态已重置。"
+
+    async def _start_job(self, key: str, op: str, category: str, send_cb, *, preview_only: bool = False) -> str:
         category = self._normalize_category(category)
         if not self.enabled:
             return "🛑 一键上架/炼金模块已关闭。"
         if category not in SUPPORTED_CATEGORIES:
-            return "❌ 品类错误，仅支持：药材、装备、神物、丹药。"
+            return "❌ 品类错误，仅支持：普通、药材、装备、神物、丹药。"
 
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
@@ -314,15 +356,16 @@ class InventoryOpsController:
             if old and old.phase in {"COLLECTING", "EXECUTING"}:
                 return f"⚠️ 当前已有一键{'上架' if old.op == 'market' else '炼金'}任务正在执行：{old.category}，请等待完成。"
 
-            job = InventoryJob(op=op, category=category, stats=self._init_stats(op, category))
+            job = InventoryJob(op=op, category=category, preview_only=preview_only, stats=self._init_stats(op, category))
             self.jobs[key] = job
 
         first_cmd = self._bag_command(category, 1)
         await send_cb(f"@{self.official_qq} {first_cmd}")
         job.last_command_ts = job.updated_at = time.time()
         op_name = "上架" if op == "market" else "炼金"
+        prefix = "预览" if preview_only else "启动"
         return (
-            f"✅ 已启动一键{op_name}{category}流程\n"
+            f"✅ 已{prefix}一键{op_name}{category}流程\n"
             f"📦 正在拉取背包分页：{first_cmd}\n"
             "流程执行期间请不要同时启动其他一键上架/炼金任务。"
         )
@@ -384,12 +427,16 @@ class InventoryOpsController:
 
         success_kw = self.SUCCESS_MARKET if job.op == "market" else self.SUCCESS_ALCHEMY
         if success_kw in text:
+            if self.side_effect_guard and job.current.get("request_id"):
+                await self.side_effect_guard.confirm(key, "inventory_ops", job.current["request_id"], "success")
             await self._mark_current_done(key, job, True, "", send_cb)
             return True
         if any(k in text for k in self.FAIL_KEYWORDS):
 
             action_hint = "上架" if job.op == "market" else "炼金"
             if name and (name in text or action_hint in text):
+                if self.side_effect_guard and job.current.get("request_id"):
+                    await self.side_effect_guard.confirm(key, "inventory_ops", job.current["request_id"], "explicit_failure")
                 await self._mark_current_done(key, job, False, self._short_reason(text), send_cb)
                 return True
         return False
@@ -404,7 +451,15 @@ class InventoryOpsController:
             self.jobs.pop(key, None)
             return
         if job.phase == "EXECUTING" and job.current and job.last_command_ts and now - job.last_command_ts > self.action_timeout_sec:
-            await self._mark_current_done(key, job, False, "等待小小回执超时", send_cb)
+            if self.side_effect_guard and job.current.get("request_id"):
+                await self.side_effect_guard.pause_unknown(
+                    key, "inventory_ops", job.current["request_id"], "一键操作等待回执超时"
+                )
+                job.phase = "PAUSED"
+                job.stats["paused_reason"] = "一键操作结果未知，已停止且不会自动重发"
+                await send_cb("⚠️ 一键操作等待回执超时，当前结果未知，流程已暂停且不会自动重发；请检查官方回执后重置任务。")
+            else:
+                await self._mark_current_done(key, job, False, "等待小小回执超时", send_cb)
 
 
     async def _prepare_and_execute(self, key: str, job: InventoryJob, send_cb) -> None:
@@ -413,6 +468,20 @@ class InventoryOpsController:
             job.plan = await self._build_market_plan(job, items)
         else:
             job.plan = self._build_alchemy_plan(job, items)
+
+        fingerprint = self._plan_fingerprint(job)
+        if job.confirm_pending and fingerprint != job.preview_fingerprint:
+            self.preview_plans.pop(key, None)
+            self.jobs.pop(key, None)
+            await send_cb("⚠️ 预览确认失败：背包或价格已变化，计划已取消，请重新预览。")
+            return
+        if job.preview_only:
+            job.preview_fingerprint = fingerprint
+            job.phase = "PREVIEW_READY"
+            self.preview_plans[key] = job
+            self.jobs.pop(key, None)
+            await send_cb(self._preview_summary(job))
+            return
 
         job.phase = "EXECUTING"
         job.current = None
@@ -423,13 +492,32 @@ class InventoryOpsController:
             return
         await self._send_next_action(key, job, send_cb)
 
+    def _plan_fingerprint(self, job: InventoryJob) -> str:
+        import hashlib
+        payload = json.dumps(sorted(job.plan, key=lambda item: (item.get("name", ""), item.get("cmd", ""))), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _preview_summary(self, job: InventoryJob) -> str:
+        op_name = "上架" if job.op == "market" else "炼金"
+        lines = [f"🔎 【一键{op_name}预览】", f"品类：{job.category}", f"计划数量：{len(job.plan)}"]
+        for item in job.plan[:30]:
+            lines.append(f"- {item.get('name', '未知')} × {item.get('count', 0)}")
+        if len(job.plan) > 30:
+            lines.append(f"- 其余 {len(job.plan) - 30} 项省略")
+        lines.append(f"确认指令：确认一键{op_name}")
+        return "\n".join(lines)
+
     async def _build_market_plan(self, job: InventoryJob, items: List[InventoryItem]) -> List[Dict[str, Any]]:
         plan: List[Dict[str, Any]] = []
         for item in items:
             if item.category == CATEGORY_PROP:
                 job.stats["skip_prop"] += 1
                 continue
-            if item.category != job.category:
+            if job.category != CATEGORY_GENERAL and item.category != job.category:
+                continue
+            if job.category == CATEGORY_GENERAL and item.category not in {
+                CATEGORY_HERB, CATEGORY_PILL, CATEGORY_EQUIP, CATEGORY_ARTIFACT
+            }:
                 continue
             if item.category == CATEGORY_EQUIP and item.equipped:
                 job.stats["skip_equipped"] += 1
@@ -467,7 +555,11 @@ class InventoryOpsController:
             if item.category == CATEGORY_PROP:
                 job.stats["skip_prop"] += 1
                 continue
-            if item.category != job.category:
+            if job.category != CATEGORY_GENERAL and item.category != job.category:
+                continue
+            if job.category == CATEGORY_GENERAL and item.category not in {
+                CATEGORY_HERB, CATEGORY_PILL, CATEGORY_EQUIP, CATEGORY_ARTIFACT
+            }:
                 continue
             norm = self.normalize_name(item.name)
             if item.category == CATEGORY_EQUIP and item.equipped:
@@ -564,8 +656,30 @@ class InventoryOpsController:
             await self._finish_job(key, job, send_cb)
             return
         job.current = job.plan.pop(0)
+        if self.side_effect_guard:
+            decision = await self.side_effect_guard.begin(
+                key, "inventory_ops", job.op, str(job.current.get("cmd", ""))
+            )
+            if not decision.allowed:
+                job.plan.insert(0, job.current)
+                job.current = None
+                job.phase = "PAUSED"
+                job.stats["paused_reason"] = decision.reason
+                await send_cb(f"⚠️ 一键操作已暂停：{decision.reason}")
+                return
+            job.current["request_id"] = decision.request_id or ""
         job.last_command_ts = job.updated_at = time.time()
-        await send_cb(f"@{self.official_qq} {job.current['cmd']}")
+        try:
+            await send_cb(f"@{self.official_qq} {job.current['cmd']}")
+        except Exception as exc:
+            if self.side_effect_guard and job.current.get("request_id"):
+                await self.side_effect_guard.pause_unknown(
+                    key, "inventory_ops", job.current["request_id"], f"发送异常：{exc}"
+                )
+                job.phase = "PAUSED"
+                job.stats["paused_reason"] = "一键操作发送结果未知，已暂停"
+                return
+            raise
 
     async def _mark_current_done(self, key: str, job: InventoryJob, ok: bool, reason: str, send_cb) -> None:
         cur = job.current or {}
