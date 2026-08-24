@@ -163,4 +163,6 @@ class LinjieCandidate:
 
     @property
     def roi_days(self) -> float:
+        if self.gain <= 0:
+            return float("inf")
         return self.cost / self.gain / 86400

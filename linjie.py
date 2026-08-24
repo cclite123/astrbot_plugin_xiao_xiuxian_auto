@@ -217,6 +217,16 @@ class LinjieState:
             inst.blocked_commands = []
         if not isinstance(inst.query_commands, list):
             inst.query_commands = []
+        # 状态文件损坏时这些 dict 字段可能是任意 JSON 类型；
+        # 不兜底会让后续 last_plan.get()/pending_action.get() 直接崩溃。
+        if not isinstance(inst.last_plan, dict):
+            inst.last_plan = {}
+        if not isinstance(inst.pending_action, dict):
+            inst.pending_action = {}
+        if not isinstance(inst.page_texts, dict):
+            inst.page_texts = {}
+        if not isinstance(inst.module_snapshot, dict):
+            inst.module_snapshot = {}
         return inst
 
 

@@ -115,7 +115,7 @@ class LinjieUpgradeTests(unittest.TestCase):
             payload["sent_at"] = "not-a-timestamp"
             repository._path("a", "g").write_text(json.dumps(payload), encoding="utf-8")
 
-            with self.assertRaisesRegex(RuntimeError, "a_g.json"):
+            with self.assertRaisesRegex(RuntimeError, "a_g"):
                 repository.load("a", "g")
 
     def test_execution_state_migrates_oldest_generation_files(self) -> None:

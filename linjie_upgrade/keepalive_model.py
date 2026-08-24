@@ -24,6 +24,10 @@ class LinjieKeepalivePolicy:
     response_timeout_seconds: int = 10
     max_retries: int = 3
 
+    def __post_init__(self) -> None:
+        if self.interval_seconds <= 0 or self.response_timeout_seconds <= 0 or self.max_retries < 0:
+            raise ValueError("灵界保活策略无效")
+
 
 @dataclass
 class LinjieKeepaliveState:
