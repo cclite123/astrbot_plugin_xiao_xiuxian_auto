@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 from collections import OrderedDict
 import re
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from urllib import request as urllib_request
 
 try:
     from openai import AsyncOpenAI
@@ -75,6 +78,8 @@ class CaptchaGuard:
     MAX_SEEN_MSG_SEQS = 64
     MAX_RAW_PB_RECORDS = 4
     MAX_RAW_PB_CHARS = 16 * 1024 * 1024
+    IMAGE_DOWNLOAD_TIMEOUT_SEC = 20
+    MAX_IMAGE_BYTES = 8 * 1024 * 1024
     CALLBACK_DATA_RE = re.compile(
         r"(?i)((?:['\"]?callback[_ ]?data['\"]?|callbackdata)\s*[:=]\s*)(?:'[^']*'|\"[^\"]*\"|[^,\s)]+)"
     )
@@ -484,6 +489,7 @@ class CaptchaGuard:
         return True
 
     async def _recognize(self, image_url: str, target_index: int, labels: List[str]) -> str:
+        image_data_uri = await self._image_data_uri(image_url)
         prompt = (
             "这是一张横向排列的 QQ 机器人干扰验证码图片，请从左到右识别有效物品。"
             "图片中的浅色、低饱和或半透明图案全部是背景干扰，即使轮廓清晰也不能计数。"
@@ -500,11 +506,55 @@ class CaptchaGuard:
             model=self.model,
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "image_url", "image_url": {"url": image_data_uri}},
             ]}],
             max_tokens=16,
         )
         return str(response.choices[0].message.content or "").strip()
+
+    @classmethod
+    def _download_image(cls, image_url: str) -> Tuple[bytes, str]:
+        request = urllib_request.Request(
+            image_url,
+            headers={
+                "Accept": "image/*",
+                "User-Agent": "astrbot-plugin-xiao-xiuxian-auto/1.0",
+            },
+        )
+        with urllib_request.urlopen(request, timeout=cls.IMAGE_DOWNLOAD_TIMEOUT_SEC) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > cls.MAX_IMAGE_BYTES:
+                raise ValueError("验证码图片超过 8MB 限制")
+
+            chunks = []
+            total = 0
+            while True:
+                chunk = response.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > cls.MAX_IMAGE_BYTES:
+                    raise ValueError("验证码图片超过 8MB 限制")
+                chunks.append(chunk)
+
+            if not total:
+                raise ValueError("验证码图片为空")
+
+            content_type = str(response.headers.get_content_type() or "").lower()
+            if content_type not in {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}:
+                content_type = "image/jpeg"
+            return b"".join(chunks), content_type
+
+    async def _image_data_uri(self, image_url: str) -> str:
+        image_bytes, content_type = await asyncio.to_thread(self._download_image, image_url)
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        self._log(
+            "info",
+            "[captcha][VISION] 验证码图片已转 Base64 bytes=%d content_type=%s",
+            len(image_bytes),
+            content_type,
+        )
+        return f"data:{content_type};base64,{encoded}"
 
     def _walk_nodes(self, root) -> List[Dict[str, Any]]:
         seen = set()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sys
 import unittest
@@ -115,6 +116,15 @@ async def noop_notify(_message):
 
 
 class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.image_download_patch = patch.object(
+            captcha_module.CaptchaGuard,
+            "_download_image",
+            return_value=(b"fixture-image", "image/jpeg"),
+        )
+        self.image_download_patch.start()
+        self.addCleanup(self.image_download_patch.stop)
+
     def test_debug_logging_is_enabled_by_default_for_captcha_diagnostics(self):
         root = Path(__file__).resolve().parents[1]
         config = json.loads((root / "config.json").read_text(encoding="utf-8"))
@@ -653,6 +663,40 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status.active)
         self.assertEqual(status.phase, "awaiting_confirmation")
 
+    async def test_model_receives_base64_image_data_uri_instead_of_remote_url(self):
+        async def exact_answer(_kwargs):
+            return "🚗"
+
+        client = FakeVisionClient(exact_answer)
+        clicks = []
+
+        async def click(payload):
+            clicks.append(payload)
+
+        with patch.object(captcha_module, "AsyncOpenAI", return_value=client):
+            guard = CaptchaGuard(
+                {
+                    "enabled": True,
+                    "vision_api_key": "fixture",
+                    "vision_model": "fixture-model",
+                }
+            )
+            handled = await guard.handle(
+                "10001:20002",
+                make_event(),
+                "请点击图中第2个表情 ![captcha](https://qqbot.ugcimg.cn/example.png)",
+                "10001",
+                noop_notify,
+                click,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(1, len(clicks))
+        image_url = client.chat.completions.calls[0]["messages"][0]["content"][1]["image_url"]["url"]
+        self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
+        self.assertEqual(b"fixture-image", base64.b64decode(image_url.split(",", 1)[1]))
+        self.assertNotIn("https://qqbot.ugcimg.cn/example.png", image_url)
+
     async def test_same_msg_seq_is_recognized_only_once(self):
         started = asyncio.Event()
         release = asyncio.Event()
@@ -736,10 +780,12 @@ class CaptchaGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_visual_result_cannot_click_newer_keyboard(self):
         first_started = asyncio.Event()
         release_first = asyncio.Event()
+        answer_count = 0
 
-        async def answer_by_image(kwargs):
-            image_url = kwargs["messages"][0]["content"][1]["image_url"]["url"]
-            if image_url.endswith("first.png"):
+        async def answer_by_image(_kwargs):
+            nonlocal answer_count
+            answer_count += 1
+            if answer_count == 1:
                 first_started.set()
                 await release_first.wait()
                 return "🚗"
