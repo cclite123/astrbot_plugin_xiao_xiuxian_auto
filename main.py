@@ -154,6 +154,7 @@ ENDLESS_TOWER_CONFIG_DEFAULTS = {
 
 __plugin_name__ = "astrbot_plugin_xiao_xiuxian_auto"
 __plugin_version__ = "1.0.0"
+__plugin_update_date__ = "08-25 17:42"
 __plugin_author__ = "cclite123"
 __plugin_desc__ = "小小修仙任务挂机插件 —— 悬赏、秘境、宗门、炼丹、签到、挖矿、灵田、闭关修炼，一键解放双手。"
 
@@ -1843,7 +1844,8 @@ class XiaoXiuxianAuto(Star):
                     f"▶ 修仙菜单 坊市\n"
                     f"▶ 修仙菜单 无尽\n"
                     f"▶ 修仙菜单 系统\n"
-                    f"▶ 任务状态 / 修仙状态")
+                    f"▶ 任务状态 / 修仙状态\n"
+                    f"📅 版本更新日期：{__plugin_update_date__}")
 
         elif sub_menu == "悬赏":
             return (f"📜 【悬赏模块】指令说明 📜\n"
