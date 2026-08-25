@@ -425,6 +425,162 @@ class StateMachineRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cultivate_state.suspended_for_activity)
         self.assertIn("@3889001741 闭关", plugin._official_messages)
 
+    async def test_secret_completion_probes_again_after_settlement(self):
+        controller = SecretController(MemoryStore(), "3889001741")
+        key = "10001:20002"
+        now = time.time()
+        await controller._set(
+            key,
+            SecretState(
+                enabled=True,
+                phase="VERIFYING",
+                next_step_ts=now - 1,
+                last_action_ts=now,
+                daily_count=1,
+            ),
+        )
+        send = SendRecorder()
+
+        await controller.tick(key, send)
+
+        state = await controller._get(key)
+        self.assertEqual(["@3889001741 探索秘境"], send.messages)
+        self.assertEqual("PROBING", state.phase)
+
+    async def test_secret_settlement_waits_for_probe_reply_before_restoring_seclusion(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        plugin = _make_plugin_shell(main)
+        send_cb = plugin._make_send_cb(key)
+        now = time.time()
+        await plugin.cultivate._set(
+            key,
+            CultivateState(
+                mode=MODE_SECT_SECLUSION,
+                is_resting=False,
+                suspended_for_activity=True,
+                hp_percent=100.0,
+                hp_check_ts=now,
+            ),
+        )
+        await plugin.secret._set(
+            key,
+            SecretState(
+                enabled=True,
+                phase="EXPLORING",
+                settle_at_ts=now - 1,
+                last_action_ts=now - 100,
+                daily_count=0,
+            ),
+        )
+
+        await plugin.secret.tick(key, send_cb)
+        await plugin._maybe_restore_rest_after_activities_done(key, send_cb)
+
+        state = await plugin.secret._get(key)
+        cultivate_state = await plugin.cultivate._get(key)
+        self.assertEqual("VERIFYING", state.phase)
+        self.assertFalse(cultivate_state.is_resting)
+        self.assertEqual(["@3889001741 秘境结算"], plugin._official_messages)
+
+        state.next_step_ts = time.time() - 1
+        await plugin.secret._set(key, state)
+        await plugin.secret.tick(key, send_cb)
+        await plugin._maybe_restore_rest_after_activities_done(key, send_cb)
+
+        state = await plugin.secret._get(key)
+        cultivate_state = await plugin.cultivate._get(key)
+        self.assertEqual("PROBING", state.phase)
+        self.assertFalse(cultivate_state.is_resting)
+        self.assertEqual(
+            ["@3889001741 秘境结算", "@3889001741 探索秘境"],
+            plugin._official_messages,
+        )
+
+        await plugin.secret.on_official_text(
+            key,
+            "道友已经参加过本次秘境啦，请把机会留给更多的道友！",
+            send_cb,
+        )
+        await plugin._maybe_restore_rest_after_activities_done(key, send_cb)
+
+        state = await plugin.secret._get(key)
+        cultivate_state = await plugin.cultivate._get(key)
+        self.assertEqual("SLEEPING", state.phase)
+        self.assertTrue(cultivate_state.is_resting)
+        self.assertEqual(
+            ["@3889001741 秘境结算", "@3889001741 探索秘境", "@3889001741 宗门闭关"],
+            plugin._official_messages,
+        )
+
+    async def test_secret_completion_text_variants_restore_sect_seclusion(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        plugin = _make_plugin_shell(main)
+        send_cb = plugin._make_send_cb(key)
+        await plugin.cultivate._set(
+            key,
+            CultivateState(
+                mode=MODE_SECT_SECLUSION,
+                is_resting=False,
+                suspended_for_activity=True,
+            ),
+        )
+        await plugin.secret._set(
+            key,
+            SecretState(enabled=True, phase="VERIFYING", daily_count=1),
+        )
+
+        await plugin.secret.on_official_text(
+            key,
+            "道友已经参加过本次秘境啦，请把机会留给更多的道友！",
+            send_cb,
+        )
+        await plugin._maybe_restore_rest_after_activities_done(key, send_cb)
+
+        state = await plugin.secret._get(key)
+        cultivate_state = await plugin.cultivate._get(key)
+        self.assertEqual("SLEEPING", state.phase)
+        self.assertTrue(cultivate_state.is_resting)
+        self.assertIn("@3889001741 宗门闭关", plugin._official_messages)
+
+    async def test_secret_settlement_timeout_retries_probe(self):
+        main = _import_main_with_astrbot_stubs()
+        key = "10001:20002"
+        plugin = _make_plugin_shell(main)
+        send_cb = plugin._make_send_cb(key)
+        now = time.time()
+        await plugin.cultivate._set(
+            key,
+            CultivateState(
+                mode=MODE_SECT_SECLUSION,
+                is_resting=False,
+                suspended_for_activity=True,
+                hp_percent=100.0,
+                hp_check_ts=now,
+            ),
+        )
+        await plugin.secret._set(
+            key,
+            SecretState(
+                enabled=True,
+                phase="VERIFYING",
+                last_action_ts=now - 121,
+                next_step_ts=now - 1,
+                daily_count=1,
+            ),
+        )
+
+        await plugin.secret.tick(key, send_cb)
+        await plugin._maybe_restore_rest_after_activities_done(key, send_cb)
+
+        state = await plugin.secret._get(key)
+        cultivate_state = await plugin.cultivate._get(key)
+        self.assertEqual("PROBING", state.phase)
+        self.assertFalse(cultivate_state.is_resting)
+        self.assertIn("@3889001741 探索秘境", plugin._official_messages)
+        self.assertNotIn("@3889001741 宗门闭关", plugin._official_messages)
+
     async def test_secret_low_hp_uses_temporary_cultivation_then_restores_idle(self):
         main = _import_main_with_astrbot_stubs()
         key = "10001:20002"

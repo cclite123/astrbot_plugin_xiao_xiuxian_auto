@@ -51,7 +51,13 @@ RE_SECRET_START = re.compile(
     re.S,
 )
 RE_SECRET_KEY = re.compile(r"秘境|万妖之域|东玄域|西玄域|狐鸣山|云梦泽|黑水湖|乱魔海")
-RE_ALREADY_DONE = re.compile(r"已经参加过本次秘境")
+# Official completion text varies depending on the bot version.  The
+# completion reply is expected after the post-settlement probe, so all known
+# forms are accepted as the terminal result for the second confirmation.
+RE_ALREADY_DONE = re.compile(
+    r"已经参加过本次秘境|今日(?:已|已经)完成秘境|今日秘境(?:已|已经)完成|"
+    r"(?:本次|当前)秘境(?:探索|结算)?(?:已|已经)?(?:完成|成功)"
+)
 RE_BUSY_IN_SECRET = re.compile(r"正在秘境中|分身乏术")
 RE_IN_PROGRESS = re.compile(
     r"进行中的[:：]?\s*(?P<area>[^\s,，]+)探索.*?预计\s*(?P<min>\d+(?:\.\d+)?)\s*分钟(?:[（(].*?[）)])?\s*后可结束",
@@ -190,17 +196,7 @@ class SecretController:
         if RE_ALREADY_DONE.search(text):
             if st.phase not in ("VERIFYING", "PROBING", "SETTLING_1", "SETTLING_2", "EXPLORING"):
                 return
-            st.done_streak += 1
-            self._info(f"[secret] {key} 收到「已完成」第 {st.done_streak} 次")
-
-
-
-
-            # A single official reply is enough to confirm that today's
-            # secret run has been consumed.  Waiting for a second identical
-            # reply left the controller in PROBING when the bot only emitted
-            # one completion response, which also prevented the main loop
-            # from restoring a suspended cultivation/seclusion mode.
+            self._info(f"[secret] {key} 收到秘境完成回执")
             await self._enter_sleep_until_next_day(
                 key, st, send_cb, reason=f"今日共完成 {st.daily_count} 轮")
             return
@@ -249,9 +245,6 @@ class SecretController:
             return
 
         if st.phase == "EXPLORING" and st.settle_at_ts and now >= st.settle_at_ts:
-
-
-
             st.daily_count += 1
             st.last_done_date = self._now_beijing().strftime("%Y-%m-%d")
             st.phase = "VERIFYING"
@@ -265,6 +258,10 @@ class SecretController:
             return
 
         if st.phase == "VERIFYING" and st.next_step_ts and now >= st.next_step_ts:
+            # The first settlement only closes the exploration timer.  A
+            # second probe is required to receive the official
+            # "已经参加过本次秘境" confirmation before sleeping and restoring
+            # the previous cultivation mode.
             st.phase = "PROBING"
             st.next_step_ts = 0.0
             st.last_action_ts = now
@@ -273,14 +270,11 @@ class SecretController:
             return
 
         if st.phase == "VERIFYING" and st.last_action_ts and (now - st.last_action_ts) > 120:
-            st.done_streak += 1
-            if st.done_streak >= 2:
-                await self._enter_sleep_until_next_day(key, st, send_cb, reason="验证超时按完成处理")
-            else:
-                st.phase = "PROBING"
-                st.last_action_ts = now
-                await self._set(key, st)
-                await send_cb(f"@{self.official_qq} 探索秘境")
+            st.phase = "PROBING"
+            st.next_step_ts = 0.0
+            st.last_action_ts = now
+            await self._set(key, st)
+            await send_cb(f"@{self.official_qq} 探索秘境")
             return
 
         if st.phase == "PROBING" and st.last_action_ts and (now - st.last_action_ts) > 300:
